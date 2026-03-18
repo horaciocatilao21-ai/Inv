@@ -30,6 +30,13 @@ import io
 import pandas as pd
 import streamlit as st
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+TZ_CHILE = ZoneInfo("America/Santiago")
+
+def now_chile() -> datetime:
+    """Retorna la fecha/hora actual en zona horaria de Chile."""
+    return datetime.now(TZ_CHILE)
 from pathlib import Path
 from gdrive import descargar_excel, subir_excel
 
@@ -79,7 +86,7 @@ class InventarioRepo:
 
     def hacer_backup(self) -> str:
         Path(DIR_BACKUP).mkdir(parents=True, exist_ok=True)
-        ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+        ts      = now_chile().strftime("%Y%m%d_%H%M%S")
         destino = f"{DIR_BACKUP}/{Path(self.ruta).stem}_backup_{ts}.xlsx"
         shutil.copy2(self.ruta, destino)
         return destino
@@ -298,7 +305,7 @@ class StockService:
             obs_raw   = str(row.get("Observación", "")).strip()
             obs       = obs_raw if obs_raw and obs_raw.upper() != "NAN" else "Inventario inicial"
             filas_ok.append({
-                "Fecha":             datetime.now(),
+                "Fecha":             now_chile(),
                 "Código":            cod,
                 "Nombre del insumo": nombre_por_codigo[cod],
                 "Lote":              lote,
@@ -516,7 +523,7 @@ with tab_ingreso:
         with col_tit_ing:
             st.markdown("##### Agregar ítem al ingreso")
         with col_fecha_ing:
-            st.info(f"🕐 {datetime.now().strftime('%d-%m-%Y  %H:%M')}")
+            st.info(f"🕐 {now_chile().strftime('%d-%m-%Y  %H:%M')}")
         opts_ing = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
                     for _, r in df_insumos.iterrows()}
         sel_ing  = st.selectbox("Insumo", list(opts_ing.keys()), key="ing_insumo")
@@ -606,7 +613,7 @@ with tab_ingreso:
             f"✅ Confirmar ingreso ({len(carrito)} ítem{'s' if len(carrito) > 1 else ''})",
             type="primary", key="btn_confirmar_ing"
         ):
-            ahora = datetime.now()
+            ahora = now_chile()
             nuevas_filas = []
             for item in carrito:
                 nuevas_filas.append({
@@ -675,7 +682,7 @@ with tab_salida:
         with col_tit_sal:
             st.markdown("##### Agregar ítem a la salida")
         with col_fecha_sal:
-            st.info(f"🕐 {datetime.now().strftime('%d-%m-%Y  %H:%M')}")
+            st.info(f"🕐 {now_chile().strftime('%d-%m-%Y  %H:%M')}")
 
         opts_sal = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
                     for _, r in df_insumos.iterrows()}
@@ -886,7 +893,7 @@ with tab_salida:
                     st.markdown(e)
                 st.warning("Edita el carrito antes de confirmar.")
             else:
-                ahora = datetime.now()
+                ahora = now_chile()
                 nuevas_filas = []
                 for item in carrito_s:
                     nuevas_filas.append({

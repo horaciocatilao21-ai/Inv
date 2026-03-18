@@ -171,6 +171,44 @@ class StockService:
             df_l["Disponible"] = df_l["Cantidad"]
         return df_l[df_l["Disponible"] > 0].reset_index(drop=True)
 
+    def vencimientos_proximos(self, df_ing, df_sal, dias: int = 60) -> pd.DataFrame:
+        """
+        Devuelve todos los lotes con stock disponible cuya fecha de caducidad
+        está entre hoy y hoy + `dias`. Excluye lotes sin vencimiento (S/V).
+        """
+        df_lote = self.construir_stock_por_lote(df_ing, df_sal)
+        df_lote = df_lote[df_lote["Stock disponible"] > 0].copy()
+
+        hoy   = pd.Timestamp.now().normalize()
+        limite = hoy + pd.Timedelta(days=dias)
+
+        def _parse(v):
+            if pd.isna(v) or str(v).strip().upper() in ("S/V", "NAN", ""):
+                return pd.NaT
+            try:
+                return pd.to_datetime(v)
+            except Exception:
+                return pd.NaT
+
+        df_lote["_fecha_dt"] = df_lote["Fecha de caducidad"].apply(_parse)
+        prox = df_lote[
+            df_lote["_fecha_dt"].notna() &
+            (df_lote["_fecha_dt"] >= hoy) &
+            (df_lote["_fecha_dt"] <= limite)
+        ].copy()
+
+        prox["Días restantes"] = (prox["_fecha_dt"] - hoy).dt.days
+
+        def _semaforo(d):
+            if d <= 15:  return "🔴 Crítico"
+            if d <= 30:  return "🟠 Urgente"
+            return "🟡 Próximo"
+
+        prox["Estado"] = prox["Días restantes"].apply(_semaforo)
+        prox["Fecha de caducidad"] = prox["_fecha_dt"].dt.strftime("%d-%m-%Y")
+        return prox[["Código", "Nombre del insumo", "Lote", "Fecha de caducidad",
+                     "Días restantes", "Estado", "Stock disponible"]]            .sort_values("Días restantes").reset_index(drop=True)
+
     def construir_stock_por_lote(self, df_ing, df_sal):
         ing_ag = df_ing.groupby(
             ["Código", "Nombre del insumo", "Lote", "Fecha de caducidad"]
@@ -403,14 +441,26 @@ with st.sidebar:
         file_name="inventario_copia_local.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+    st.divider()
+    # Badge de alertas rápidas en sidebar
+    _df_alerta_sb = servicio.vencimientos_proximos(df_ing, df_sal, dias=30)
+    _criticos     = len(_df_alerta_sb[_df_alerta_sb["Estado"] == "🔴 Crítico"])
+    _urgentes     = len(_df_alerta_sb[_df_alerta_sb["Estado"] == "🟠 Urgente"])
+    if _criticos:
+        st.error(f"🔴 {_criticos} lote(s) vencen en ≤ 15 días")
+    if _urgentes:
+        st.warning(f"🟠 {_urgentes} lote(s) vencen en ≤ 30 días")
+    if not _criticos and not _urgentes:
+        st.success("✅ Sin vencimientos críticos (30 días)")
 
 # ── Pestañas ──────────────────────────────────────────────────────────────────
-tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes = st.tabs([
+tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes, tab_alertas = st.tabs([
     "🔍 Consultar Stock",
     "➕ Registrar Ingreso",
     "➖ Registrar Salida",
     "📂 Carga Inicial",
     "📊 Reportes",
+    "⚠️ Alertas",
 ])
 
 
@@ -786,35 +836,71 @@ with tab_salida:
                 st.session_state.carrito_sal = []
                 st.rerun()
 
-        # ── Confirmar y guardar todo ───────────────────────────────────────
+        # ── Confirmar y guardar todo (con validación anti-sobredespacho) ────
         st.divider()
         if st.button(
             f"✅ Confirmar salida ({len(carrito_s)} ítem{'s' if len(carrito_s) > 1 else ''})",
             type="primary", key="btn_confirmar_sal"
         ):
-            ahora = datetime.now()
-            nuevas_filas = []
+            # Validar stock real en el momento de confirmar
+            df_ing_actual = repo.cargar_ingresos()
+            df_sal_actual = repo.cargar_salidas()
+            errores_stock = []
+
+            # Agrupar carrito por (Código, Lote) para validar totales
+            from collections import defaultdict
+            totales_carrito = defaultdict(float)
             for item in carrito_s:
-                nuevas_filas.append({
-                    "Fecha":                       ahora,
-                    "Código":                      item["Código"],
-                    "Nombre del insumo":           item["Nombre del insumo"],
-                    "Lote":                        item["Lote"],
-                    "Cantidad":                    item["Cantidad"],
-                    "Fecha de caducidad asociada": item["_venc_raw"],
-                    "Destino":                     item["Destino"],
-                    "Observación":                 item["Observación"],
-                })
-            ok, msg = guardar_y_reportes(
-                pd.concat([df_sal, pd.DataFrame(nuevas_filas)], ignore_index=True),
-                "Salidas"
-            )
-            if ok:
-                st.session_state.carrito_sal = []
-                st.success(msg)
-                st.rerun()
+                totales_carrito[(item["Código"], item["Lote"])] += item["Cantidad"]
+
+            for (cod, lote), cant_total in totales_carrito.items():
+                lotes_reales = servicio.stock_por_lote(cod, df_ing_actual, df_sal_actual)
+                if lotes_reales.empty:
+                    errores_stock.append(
+                        f"❌ **{cod} — Lote {lote}**: sin stock disponible en este momento.")
+                    continue
+                fila_lote = lotes_reales[
+                    lotes_reales["Lote"].astype(str).str.upper() == str(lote).upper()]
+                if fila_lote.empty:
+                    errores_stock.append(
+                        f"❌ **{cod} — Lote {lote}**: lote no encontrado al momento de confirmar.")
+                    continue
+                stock_real = float(fila_lote.iloc[0]["Disponible"])
+                if cant_total > stock_real:
+                    nom = carrito_s[0]["Nombre del insumo"]
+                    errores_stock.append(
+                        f"❌ **{nom} — Lote {lote}**: solicitado {int(cant_total)}, "
+                        f"disponible real {int(stock_real)}.")
+
+            if errores_stock:
+                st.error("**No se puede confirmar la salida. Stock insuficiente:**")
+                for e in errores_stock:
+                    st.markdown(e)
+                st.warning("Edita el carrito antes de confirmar.")
             else:
-                st.error(msg)
+                ahora = datetime.now()
+                nuevas_filas = []
+                for item in carrito_s:
+                    nuevas_filas.append({
+                        "Fecha":                       ahora,
+                        "Código":                      item["Código"],
+                        "Nombre del insumo":           item["Nombre del insumo"],
+                        "Lote":                        item["Lote"],
+                        "Cantidad":                    item["Cantidad"],
+                        "Fecha de caducidad asociada": item["_venc_raw"],
+                        "Destino":                     item["Destino"],
+                        "Observación":                 item["Observación"],
+                    })
+                ok, msg = guardar_y_reportes(
+                    pd.concat([df_sal, pd.DataFrame(nuevas_filas)], ignore_index=True),
+                    "Salidas"
+                )
+                if ok:
+                    st.session_state.carrito_sal = []
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
 
     # ── Historial de salidas registradas ──────────────────────────────────────
     st.divider()
@@ -877,6 +963,75 @@ with tab_carga:
                         st.error(msg)
         except Exception as e:
             st.error(f"Error al procesar el archivo: {e}")
+
+
+# ══════════════════════════════════════════════
+# TAB 6 — ALERTAS
+# ══════════════════════════════════════════════
+with tab_alertas:
+    st.subheader("⚠️ Alertas de vencimiento")
+
+    col_dias, _ = st.columns([1, 3])
+    with col_dias:
+        dias_alerta = st.selectbox(
+            "Mostrar lotes que vencen en los próximos:",
+            options=[15, 30, 60, 90],
+            index=1,
+            format_func=lambda x: f"{x} días",
+            key="sel_dias_alerta"
+        )
+
+    df_venc = servicio.vencimientos_proximos(df_ing, df_sal, dias=dias_alerta)
+
+    if df_venc.empty:
+        st.success(f"✅ No hay lotes con vencimiento en los próximos {dias_alerta} días.")
+    else:
+        # Métricas resumen
+        criticos = df_venc[df_venc["Estado"] == "🔴 Crítico"]
+        urgentes = df_venc[df_venc["Estado"] == "🟠 Urgente"]
+        proximos = df_venc[df_venc["Estado"] == "🟡 Próximo"]
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("🔴 Críticos (≤ 15 días)", len(criticos))
+        m2.metric("🟠 Urgentes (≤ 30 días)", len(urgentes))
+        m3.metric("🟡 Próximos a vencer",    len(proximos))
+
+        st.divider()
+
+        # Filtro por estado
+        estados_opciones = ["Todos"] + sorted(df_venc["Estado"].unique().tolist())
+        filtro_estado = st.radio(
+            "Filtrar por estado",
+            estados_opciones,
+            horizontal=True,
+            key="filtro_estado_venc"
+        )
+        df_mostrar = df_venc if filtro_estado == "Todos"             else df_venc[df_venc["Estado"] == filtro_estado]
+
+        # Colorear filas según estado
+        def _color_fila(row):
+            if row["Estado"] == "🔴 Crítico":
+                return ["background-color: #3d0000; color: #ff9999"] * len(row)
+            if row["Estado"] == "🟠 Urgente":
+                return ["background-color: #3d2000; color: #ffcc88"] * len(row)
+            return ["background-color: #3d3300; color: #ffee99"] * len(row)
+
+        st.dataframe(
+            df_mostrar.style.apply(_color_fila, axis=1),
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # Descarga
+        buf_venc = io.BytesIO()
+        df_venc.to_excel(buf_venc, index=False)
+        st.download_button(
+            "⬇️ Descargar reporte de vencimientos",
+            buf_venc.getvalue(),
+            f"vencimientos_proximos_{dias_alerta}dias.xlsx",
+            key="dl_venc",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 
 # ══════════════════════════════════════════════

@@ -431,42 +431,158 @@ with tab_consulta:
 
 
 # ══════════════════════════════════════════════
-# TAB 2 — REGISTRAR INGRESO
+# TAB 2 — REGISTRAR INGRESO (con carrito)
 # ══════════════════════════════════════════════
 with tab_ingreso:
-    st.subheader("Registrar ingreso de insumo")
-    opts_ing = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
-                for _, r in df_insumos.iterrows()}
-    sel_ing  = st.selectbox("Insumo", list(opts_ing.keys()), key="ing_insumo")
-    cod_ing  = opts_ing[sel_ing]
-    nom_ing  = df_insumos[df_insumos["Código"] == cod_ing].iloc[0]["Nombre del insumo"]
-    col_a, col_b = st.columns(2)
-    with col_a:
-        lote_ing = st.text_input("Lote (vacío = N/A)", key="ing_lote").strip().upper() or "N/A"
-        cant_ing = st.number_input("Cantidad", min_value=0.0, step=1.0, key="ing_cant")
-        prov_ing = st.text_input("Proveedor", key="ing_prov").strip()
-    with col_b:
-        fv       = st.date_input("Fecha vencimiento (opcional)", value=None, key="ing_venc")
-        venc_ing = datetime.combine(fv, datetime.min.time()) if fv else "S/V"
-        obs_ing  = st.text_area("Observación", key="ing_obs").strip()
-    if st.button("✅ Guardar ingreso", type="primary", key="btn_ing"):
-        if cant_ing <= 0:
-            st.error("La cantidad debe ser mayor a 0.")
-        else:
-            fila = {
-                "Fecha":             datetime.now(),
-                "Código":            cod_ing,
-                "Nombre del insumo": nom_ing,
-                "Lote":              lote_ing,
-                "Cantidad":          cant_ing,
-                "Fecha de caducidad": venc_ing,
-                "Proveedor":         prov_ing,
-                "Observación":       obs_ing,
-            }
+
+    # Inicializar carrito en session_state
+    if "carrito_ing" not in st.session_state:
+        st.session_state.carrito_ing = []
+
+    st.subheader("Registrar ingreso de insumos")
+
+    # ── Formulario para agregar al carrito ────────────────────────────────────
+    with st.container(border=True):
+        st.markdown("##### Agregar ítem al ingreso")
+        opts_ing = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
+                    for _, r in df_insumos.iterrows()}
+        sel_ing  = st.selectbox("Insumo", list(opts_ing.keys()), key="ing_insumo")
+        cod_ing  = opts_ing[sel_ing]
+        nom_ing  = df_insumos[df_insumos["Código"] == cod_ing].iloc[0]["Nombre del insumo"]
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            lote_ing = st.text_input("Lote (vacío = N/A)", key="ing_lote").strip().upper() or "N/A"
+            cant_ing = st.number_input("Cantidad", min_value=0.0, step=1.0, key="ing_cant")
+            prov_ing = st.text_input("Proveedor", key="ing_prov").strip()
+        with col_b:
+            fv       = st.date_input("Fecha vencimiento (opcional)", value=None, key="ing_venc")
+            venc_ing = datetime.combine(fv, datetime.min.time()) if fv else "S/V"
+            obs_ing  = st.text_area("Observación", key="ing_obs").strip()
+
+        if st.button("➕ Agregar al ingreso", key="btn_agregar_ing"):
+            if cant_ing <= 0:
+                st.error("La cantidad debe ser mayor a 0.")
+            else:
+                st.session_state.carrito_ing.append({
+                    "Código":            cod_ing,
+                    "Nombre del insumo": nom_ing,
+                    "Lote":              lote_ing,
+                    "Cantidad":          cant_ing,
+                    "Fecha de caducidad": (
+                        venc_ing.strftime("%d-%m-%Y")
+                        if hasattr(venc_ing, "strftime") else str(venc_ing)
+                    ),
+                    "Proveedor":         prov_ing,
+                    "Observación":       obs_ing,
+                    # guardamos el datetime real para el guardado
+                    "_venc_raw":         venc_ing,
+                })
+                st.success(f"✔ **{nom_ing}** agregado al ingreso.")
+                st.rerun()
+
+    # ── Tabla del carrito ─────────────────────────────────────────────────────
+    st.divider()
+    carrito = st.session_state.carrito_ing
+
+    if not carrito:
+        st.info("🛒 Aún no hay ítems en este ingreso. Agrega insumos con el formulario de arriba.")
+    else:
+        st.markdown(f"##### 🛒 Ítems en este ingreso ({len(carrito)})")
+
+        # Mostrar tabla con botón eliminar por fila
+        cols_header = st.columns([2, 3, 2, 1, 2, 2, 1])
+        for h, label in zip(cols_header, ["Código", "Nombre", "Lote", "Cantidad",
+                                           "Vencimiento", "Proveedor", ""]):
+            h.markdown(f"**{label}**")
+
+        for i, item in enumerate(carrito):
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([2, 3, 2, 1, 2, 2, 1])
+            c1.write(item["Código"])
+            c2.write(item["Nombre del insumo"])
+            c3.write(item["Lote"])
+            c4.write(int(item["Cantidad"]))
+            c5.write(item["Fecha de caducidad"])
+            c6.write(item["Proveedor"] or "—")
+            if c7.button("🗑️", key=f"del_ing_{i}", help="Eliminar este ítem"):
+                st.session_state.carrito_ing.pop(i)
+                st.rerun()
+
+        # Totales rápidos
+        st.divider()
+        resumen = (
+            pd.DataFrame(carrito)[["Nombre del insumo", "Cantidad"]]
+            .groupby("Nombre del insumo")["Cantidad"]
+            .sum()
+            .reset_index()
+            .rename(columns={"Cantidad": "Total a ingresar"})
+        )
+        col_res, col_btn = st.columns([3, 1])
+        with col_res:
+            with st.expander("📊 Ver resumen por insumo", expanded=False):
+                st.dataframe(resumen, use_container_width=True, hide_index=True)
+        with col_btn:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+            if st.button("🗑️ Vaciar carrito", key="btn_vaciar_ing"):
+                st.session_state.carrito_ing = []
+                st.rerun()
+
+        # ── Confirmar y guardar todo ───────────────────────────────────────────
+        st.divider()
+        if st.button(
+            f"✅ Confirmar ingreso ({len(carrito)} ítem{'s' if len(carrito) > 1 else ''})",
+            type="primary", key="btn_confirmar_ing"
+        ):
+            ahora = datetime.now()
+            nuevas_filas = []
+            for item in carrito:
+                nuevas_filas.append({
+                    "Fecha":              ahora,
+                    "Código":             item["Código"],
+                    "Nombre del insumo":  item["Nombre del insumo"],
+                    "Lote":               item["Lote"],
+                    "Cantidad":           item["Cantidad"],
+                    "Fecha de caducidad": item["_venc_raw"],
+                    "Proveedor":          item["Proveedor"],
+                    "Observación":        item["Observación"],
+                })
             ok, msg = guardar_y_reportes(
-                pd.concat([df_ing, pd.DataFrame([fila])], ignore_index=True), "Ingresos")
-            if ok:  st.success(msg); st.rerun()
-            else:   st.error(msg)
+                pd.concat([df_ing, pd.DataFrame(nuevas_filas)], ignore_index=True),
+                "Ingresos"
+            )
+            if ok:
+                st.session_state.carrito_ing = []
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+    # ── Historial de ingresos registrados ─────────────────────────────────────
+    st.divider()
+    with st.expander("📋 Ver historial de ingresos registrados", expanded=False):
+        if df_ing.empty:
+            st.info("No hay ingresos registrados aún.")
+        else:
+            df_hist = df_ing.copy()
+            # Formatear fecha de caducidad
+            if "Fecha de caducidad" in df_hist.columns:
+                df_hist["Fecha de caducidad"] = df_hist["Fecha de caducidad"].apply(
+                    lambda x: x.strftime("%d-%m-%Y") if hasattr(x, "strftime") else str(x))
+            if "Fecha" in df_hist.columns:
+                df_hist["Fecha"] = df_hist["Fecha"].apply(
+                    lambda x: x.strftime("%d-%m-%Y %H:%M") if hasattr(x, "strftime") else str(x))
+            # Mostrar más recientes primero
+            df_hist = df_hist.iloc[::-1].reset_index(drop=True)
+            st.dataframe(df_hist, use_container_width=True, hide_index=True)
+            buf_hist = io.BytesIO()
+            df_hist.to_excel(buf_hist, index=False)
+            st.download_button(
+                "⬇️ Descargar historial",
+                buf_hist.getvalue(),
+                "historial_ingresos.xlsx",
+                key="dl_hist_ing",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 
 # ══════════════════════════════════════════════

@@ -512,7 +512,11 @@ with tab_ingreso:
 
     # ── Formulario para agregar al carrito ────────────────────────────────────
     with st.container(border=True):
-        st.markdown("##### Agregar ítem al ingreso")
+        col_tit_ing, col_fecha_ing = st.columns([3, 1])
+        with col_tit_ing:
+            st.markdown("##### Agregar ítem al ingreso")
+        with col_fecha_ing:
+            st.info(f"🕐 {datetime.now().strftime('%d-%m-%Y  %H:%M')}")
         opts_ing = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
                     for _, r in df_insumos.iterrows()}
         sel_ing  = st.selectbox("Insumo", list(opts_ing.keys()), key="ing_insumo")
@@ -667,7 +671,11 @@ with tab_salida:
 
     # ── Formulario para agregar al carrito ────────────────────────────────────
     with st.container(border=True):
-        st.markdown("##### Agregar ítem a la salida")
+        col_tit_sal, col_fecha_sal = st.columns([3, 1])
+        with col_tit_sal:
+            st.markdown("##### Agregar ítem a la salida")
+        with col_fecha_sal:
+            st.info(f"🕐 {datetime.now().strftime('%d-%m-%Y  %H:%M')}")
 
         opts_sal = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
                     for _, r in df_insumos.iterrows()}
@@ -1039,7 +1047,13 @@ with tab_alertas:
 # ══════════════════════════════════════════════
 with tab_reportes:
     st.subheader("Reportes de stock")
-    r1, r2, r3 = st.tabs(["Stock por lote", "Stock por sucursal", "Sin lote"])
+    r1, r2, r3, r4, r5 = st.tabs([
+        "Stock por lote",
+        "Stock por sucursal",
+        "Sin lote",
+        "📥 Historial de ingresos",
+        "📤 Historial de salidas",
+    ])
 
     with r1:
         df_l = servicio.construir_stock_por_lote(df_ing, df_sal)
@@ -1067,3 +1081,129 @@ with tab_reportes:
             st.download_button("⬇️ Descargar", buf3.getvalue(), "stock_sin_lote.xlsx",
                                key="dl_sin",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    # ── Historial de ingresos ──────────────────────────────────────────────────
+    with r4:
+        st.markdown("#### 📥 Historial de ingresos")
+        if df_ing.empty:
+            st.info("No hay ingresos registrados aún.")
+        else:
+            # ── Filtros ───────────────────────────────────────────────────────
+            with st.expander("🔎 Filtros", expanded=False):
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    fi_insumos = ["Todos"] + sorted(df_ing["Nombre del insumo"].dropna().unique().tolist())
+                    fi_sel_ins = st.selectbox("Insumo", fi_insumos, key="fi_ing_insumo")
+                with fc2:
+                    fi_provs = ["Todos"] + sorted(df_ing["Proveedor"].dropna().astype(str).unique().tolist())                         if "Proveedor" in df_ing.columns else ["Todos"]
+                    fi_sel_prov = st.selectbox("Proveedor", fi_provs, key="fi_ing_prov")
+                with fc3:
+                    fi_lotes = ["Todos"] + sorted(df_ing["Lote"].dropna().unique().tolist())
+                    fi_sel_lote = st.selectbox("Lote", fi_lotes, key="fi_ing_lote")
+                fd1, fd2 = st.columns(2)
+                with fd1:
+                    fi_fecha_desde = st.date_input("Desde", value=None, key="fi_ing_desde")
+                with fd2:
+                    fi_fecha_hasta = st.date_input("Hasta", value=None, key="fi_ing_hasta")
+
+            df_hi = df_ing.copy()
+            if fi_sel_ins  != "Todos":
+                df_hi = df_hi[df_hi["Nombre del insumo"] == fi_sel_ins]
+            if fi_sel_prov != "Todos" and "Proveedor" in df_hi.columns:
+                df_hi = df_hi[df_hi["Proveedor"].astype(str) == fi_sel_prov]
+            if fi_sel_lote != "Todos":
+                df_hi = df_hi[df_hi["Lote"] == fi_sel_lote]
+            if fi_fecha_desde and "Fecha" in df_hi.columns:
+                df_hi = df_hi[pd.to_datetime(df_hi["Fecha"], errors="coerce") >= pd.Timestamp(fi_fecha_desde)]
+            if fi_fecha_hasta and "Fecha" in df_hi.columns:
+                df_hi = df_hi[pd.to_datetime(df_hi["Fecha"], errors="coerce") <= pd.Timestamp(fi_fecha_hasta) + pd.Timedelta(days=1)]
+
+            # Formatear fechas para visualización
+            df_hi_view = df_hi.copy().iloc[::-1].reset_index(drop=True)
+            if "Fecha" in df_hi_view.columns:
+                df_hi_view["Fecha"] = df_hi_view["Fecha"].apply(
+                    lambda x: x.strftime("%d-%m-%Y %H:%M") if hasattr(x, "strftime") else str(x))
+            if "Fecha de caducidad" in df_hi_view.columns:
+                df_hi_view["Fecha de caducidad"] = df_hi_view["Fecha de caducidad"].apply(
+                    lambda x: x.strftime("%d-%m-%Y") if hasattr(x, "strftime") else str(x))
+
+            # Métricas resumen
+            hm1, hm2, hm3 = st.columns(3)
+            hm1.metric("Total registros", len(df_hi_view))
+            hm2.metric("Total unidades ingresadas", int(df_hi["Cantidad"].sum()) if "Cantidad" in df_hi.columns else 0)
+            hm3.metric("Insumos distintos", df_hi["Nombre del insumo"].nunique() if "Nombre del insumo" in df_hi.columns else 0)
+
+            st.dataframe(df_hi_view, use_container_width=True, hide_index=True)
+
+            buf_hi = io.BytesIO()
+            df_hi_view.to_excel(buf_hi, index=False)
+            st.download_button(
+                "⬇️ Descargar historial filtrado",
+                buf_hi.getvalue(),
+                "historial_ingresos.xlsx",
+                key="dl_rep_ing",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+
+    # ── Historial de salidas ───────────────────────────────────────────────────
+    with r5:
+        st.markdown("#### 📤 Historial de salidas")
+        if df_sal.empty:
+            st.info("No hay salidas registradas aún.")
+        else:
+            # ── Filtros ───────────────────────────────────────────────────────
+            with st.expander("🔎 Filtros", expanded=False):
+                fs1, fs2, fs3 = st.columns(3)
+                with fs1:
+                    fs_insumos = ["Todos"] + sorted(df_sal["Nombre del insumo"].dropna().unique().tolist())
+                    fs_sel_ins = st.selectbox("Insumo", fs_insumos, key="fs_sal_insumo")
+                with fs2:
+                    fs_destinos = ["Todos"] + sorted(df_sal["Destino"].dropna().astype(str).unique().tolist())                         if "Destino" in df_sal.columns else ["Todos"]
+                    fs_sel_dest = st.selectbox("Destino", fs_destinos, key="fs_sal_dest")
+                with fs3:
+                    fs_lotes = ["Todos"] + sorted(df_sal["Lote"].dropna().unique().tolist())
+                    fs_sel_lote = st.selectbox("Lote", fs_lotes, key="fs_sal_lote")
+                fsd1, fsd2 = st.columns(2)
+                with fsd1:
+                    fs_fecha_desde = st.date_input("Desde", value=None, key="fs_sal_desde")
+                with fsd2:
+                    fs_fecha_hasta = st.date_input("Hasta", value=None, key="fs_sal_hasta")
+
+            df_hs = df_sal.copy()
+            if fs_sel_ins  != "Todos":
+                df_hs = df_hs[df_hs["Nombre del insumo"] == fs_sel_ins]
+            if fs_sel_dest != "Todos" and "Destino" in df_hs.columns:
+                df_hs = df_hs[df_hs["Destino"].astype(str) == fs_sel_dest]
+            if fs_sel_lote != "Todos":
+                df_hs = df_hs[df_hs["Lote"] == fs_sel_lote]
+            if fs_fecha_desde and "Fecha" in df_hs.columns:
+                df_hs = df_hs[pd.to_datetime(df_hs["Fecha"], errors="coerce") >= pd.Timestamp(fs_fecha_desde)]
+            if fs_fecha_hasta and "Fecha" in df_hs.columns:
+                df_hs = df_hs[pd.to_datetime(df_hs["Fecha"], errors="coerce") <= pd.Timestamp(fs_fecha_hasta) + pd.Timedelta(days=1)]
+
+            # Formatear fechas para visualización
+            df_hs_view = df_hs.copy().iloc[::-1].reset_index(drop=True)
+            if "Fecha" in df_hs_view.columns:
+                df_hs_view["Fecha"] = df_hs_view["Fecha"].apply(
+                    lambda x: x.strftime("%d-%m-%Y %H:%M") if hasattr(x, "strftime") else str(x))
+            if "Fecha de caducidad asociada" in df_hs_view.columns:
+                df_hs_view["Fecha de caducidad asociada"] = df_hs_view["Fecha de caducidad asociada"].apply(
+                    lambda x: x.strftime("%d-%m-%Y") if hasattr(x, "strftime") else str(x))
+
+            # Métricas resumen
+            sm1, sm2, sm3 = st.columns(3)
+            sm1.metric("Total registros", len(df_hs_view))
+            sm2.metric("Total unidades despachadas", int(df_hs["Cantidad"].sum()) if "Cantidad" in df_hs.columns else 0)
+            sm3.metric("Destinos distintos", df_hs["Destino"].nunique() if "Destino" in df_hs.columns else 0)
+
+            st.dataframe(df_hs_view, use_container_width=True, hide_index=True)
+
+            buf_hs = io.BytesIO()
+            df_hs_view.to_excel(buf_hs, index=False)
+            st.download_button(
+                "⬇️ Descargar historial filtrado",
+                buf_hs.getvalue(),
+                "historial_salidas.xlsx",
+                key="dl_rep_sal",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )

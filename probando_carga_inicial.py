@@ -486,9 +486,9 @@ with tab_ingreso:
     carrito = st.session_state.carrito_ing
 
     if not carrito:
-        st.info("🛒 Aún no hay ítems en este ingreso. Agrega insumos con el formulario de arriba.")
+        st.info("📥 Aún no hay ítems en este ingreso. Agrega insumos con el formulario de arriba.")
     else:
-        st.markdown(f"##### 🛒 Ítems en este ingreso ({len(carrito)})")
+        st.markdown(f"##### 📥 Ítems en este ingreso ({len(carrito)})")
 
         # Mostrar tabla con botón eliminar por fila
         cols_header = st.columns([2, 3, 2, 1, 2, 2, 1])
@@ -586,122 +586,241 @@ with tab_ingreso:
 
 
 # ══════════════════════════════════════════════
-# TAB 3 — REGISTRAR SALIDA
+# TAB 3 — REGISTRAR SALIDA (con carrito)
 # ══════════════════════════════════════════════
 with tab_salida:
-    st.subheader("Registrar salida de insumo")
-    opts_sal = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
-                for _, r in df_insumos.iterrows()}
-    sel_sal  = st.selectbox("Insumo", list(opts_sal.keys()), key="sal_insumo")
-    cod_sal  = opts_sal[sel_sal]
-    nom_sal  = df_insumos[df_insumos["Código"] == cod_sal].iloc[0]["Nombre del insumo"]
 
-    lotes_sal = servicio.stock_por_lote(cod_sal, df_ing, df_sal)
-    if lotes_sal.empty:
-        st.warning("Sin stock disponible para este insumo.")
-    else:
-        ls = lotes_sal.copy()
-        ls["Fecha de caducidad"] = ls["Fecha de caducidad"].apply(
-            lambda x: x.strftime("%d-%m-%Y") if hasattr(x, "strftime") else str(x))
-        opts_lote = {
-            f"Lote {r['Lote']} | Vence {ls.loc[i, 'Fecha de caducidad']} | Stock {int(r['Disponible'])}": i
-            for i, r in lotes_sal.iterrows()}
-        sel_lote  = st.selectbox("Lote disponible", list(opts_lote.keys()), key="sal_lote")
-        idx_lote  = opts_lote[sel_lote]
-        stock_max = float(lotes_sal.loc[idx_lote, "Disponible"])
-        lote_sel  = lotes_sal.loc[idx_lote, "Lote"]
-        venc_sel  = lotes_sal.loc[idx_lote, "Fecha de caducidad"]
+    # Inicializar carrito de salidas en session_state
+    if "carrito_sal" not in st.session_state:
+        st.session_state.carrito_sal = []
 
-        st.divider()
-        col_c, col_d = st.columns(2)
-        with col_c:
-            # ── Selector de destino ────────────────────────────────────────
-            OPCION_OTRO = "➕ Agregar nuevo destino..."
-            # Excluir Bodega Central: las salidas van HACIA sucursales externas
-            suc_destino = [s for s in lista_suc if s != "Bodega Central"] + [OPCION_OTRO]
-            dest_sel = st.selectbox(
-                "Destino / Sucursal",
-                suc_destino,
-                key="sal_destino",
-                help="Selecciona la sucursal destino. "
-                     "Si no aparece en la lista, elige '➕ Agregar nuevo destino...'"
+    st.subheader("Registrar salida de insumos")
+
+    # ── Formulario para agregar al carrito ────────────────────────────────────
+    with st.container(border=True):
+        st.markdown("##### Agregar ítem a la salida")
+
+        opts_sal = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
+                    for _, r in df_insumos.iterrows()}
+        sel_sal  = st.selectbox("Insumo", list(opts_sal.keys()), key="sal_insumo")
+        cod_sal  = opts_sal[sel_sal]
+        nom_sal  = df_insumos[df_insumos["Código"] == cod_sal].iloc[0]["Nombre del insumo"]
+
+        # Calcular stock disponible descontando ya lo que está en el carrito de salidas
+        cant_carrito = sum(
+            item["Cantidad"] for item in st.session_state.carrito_sal
+            if item["Código"] == cod_sal
+        )
+        lotes_sal = servicio.stock_por_lote(cod_sal, df_ing, df_sal)
+
+        if lotes_sal.empty:
+            st.warning("Sin stock disponible para este insumo.")
+        else:
+            ls = lotes_sal.copy()
+            ls["Fecha de caducidad"] = ls["Fecha de caducidad"].apply(
+                lambda x: x.strftime("%d-%m-%Y") if hasattr(x, "strftime") else str(x))
+            opts_lote = {
+                f"Lote {r['Lote']} | Vence {ls.loc[i, 'Fecha de caducidad']} | Stock {int(r['Disponible'])}": i
+                for i, r in lotes_sal.iterrows()}
+            sel_lote = st.selectbox("Lote disponible", list(opts_lote.keys()), key="sal_lote")
+            idx_lote  = opts_lote[sel_lote]
+            lote_sel  = lotes_sal.loc[idx_lote, "Lote"]
+            venc_sel  = lotes_sal.loc[idx_lote, "Fecha de caducidad"]
+
+            # Descontar lo ya agregado al carrito para ese lote específico
+            cant_carrito_lote = sum(
+                item["Cantidad"] for item in st.session_state.carrito_sal
+                if item["Código"] == cod_sal and item["Lote"] == lote_sel
             )
+            stock_max = max(0.0, float(lotes_sal.loc[idx_lote, "Disponible"]) - cant_carrito_lote)
 
-            if dest_sel == OPCION_OTRO:
-                st.markdown("##### ✏️ Nueva sucursal / destino")
-                dest_sal  = st.text_input(
-                    "Nombre *",
-                    key="sal_nuevo_nombre",
-                    placeholder="Ej: Sucursal Norte"
-                ).strip()
-                dest_dir  = st.text_input(
-                    "Dirección / referencia (opcional)",
-                    key="sal_nuevo_dir",
-                    placeholder="Ej: Av. Principal 123"
-                ).strip()
-                dest_resp = st.text_input(
-                    "Responsable (opcional)",
-                    key="sal_nuevo_resp",
-                    placeholder="Ej: Juan Pérez"
-                ).strip()
-                guardar_en_lista = st.checkbox(
-                    "Guardar en el catálogo de sucursales",
-                    value=True,
-                    key="sal_guardar_suc",
-                    help="Quedará disponible en el selector para futuros registros."
+            if cant_carrito_lote > 0:
+                st.caption(f"⚠️ Ya tienes **{int(cant_carrito_lote)}** unidades de este lote en la salida actual.")
+
+            col_c, col_d = st.columns(2)
+            with col_c:
+                # ── Selector de destino ────────────────────────────────────
+                OPCION_OTRO = "➕ Agregar nuevo destino..."
+                suc_destino = [s for s in lista_suc if s != "Bodega Central"] + [OPCION_OTRO]
+                dest_sel = st.selectbox(
+                    "Destino / Sucursal",
+                    suc_destino,
+                    key="sal_destino",
+                    help="Si no aparece en la lista, elige '➕ Agregar nuevo destino...'"
                 )
-                if dest_sal:
-                    st.info(f"✏️ Destino a registrar: **{dest_sal}**")
-            else:
-                dest_sal         = dest_sel
-                dest_dir         = ""
-                dest_resp        = ""
-                guardar_en_lista = False
 
-            cant_sal = st.number_input(
-                f"Cantidad (máx {int(stock_max)})",
-                min_value=0.0, max_value=stock_max, step=1.0, key="sal_cant")
-
-        with col_d:
-            obs_sal = st.text_area(
-                "Observación", key="sal_obs",
-                placeholder="Opcional: motivo, número de orden, etc."
-            ).strip()
-
-        if st.button("✅ Guardar salida", type="primary", key="btn_sal"):
-            if cant_sal <= 0:
-                st.error("La cantidad debe ser mayor a 0.")
-            elif not dest_sal:
-                st.error("Debes ingresar el nombre del destino.")
-            else:
-                # Guardar nueva sucursal en catálogo si el usuario lo indicó
-                if dest_sel == OPCION_OTRO and guardar_en_lista and dest_sal not in lista_suc:
-                    try:
-                        repo.agregar_sucursal(dest_sal, dest_dir, dest_resp)
-                        st.session_state.lista_suc = repo.cargar_sucursales()
-                        lista_suc = st.session_state.lista_suc
-                        st.success(f"Sucursal **{dest_sal}** agregada al catálogo. ✔")
-                    except Exception as e:
-                        st.warning(
-                            f"La salida se guardará, pero no se pudo agregar al catálogo: {e}")
-
-                fila = {
-                    "Fecha":                       datetime.now(),
-                    "Código":                      cod_sal,
-                    "Nombre del insumo":           nom_sal,
-                    "Lote":                        lote_sel,
-                    "Cantidad":                    cant_sal,
-                    "Fecha de caducidad asociada": venc_sel,
-                    "Destino":                     dest_sal,
-                    "Observación":                 obs_sal,
-                }
-                ok, msg = guardar_y_reportes(
-                    pd.concat([df_sal, pd.DataFrame([fila])], ignore_index=True), "Salidas")
-                if ok:
-                    st.success(msg)
-                    st.rerun()
+                if dest_sel == OPCION_OTRO:
+                    st.markdown("##### ✏️ Nueva sucursal / destino")
+                    dest_sal_txt  = st.text_input(
+                        "Nombre *", key="sal_nuevo_nombre",
+                        placeholder="Ej: Sucursal Norte"
+                    ).strip()
+                    dest_dir  = st.text_input(
+                        "Dirección / referencia (opcional)", key="sal_nuevo_dir",
+                        placeholder="Ej: Av. Principal 123"
+                    ).strip()
+                    dest_resp = st.text_input(
+                        "Responsable (opcional)", key="sal_nuevo_resp",
+                        placeholder="Ej: Juan Pérez"
+                    ).strip()
+                    guardar_en_lista = st.checkbox(
+                        "Guardar en el catálogo de sucursales",
+                        value=True, key="sal_guardar_suc",
+                        help="Quedará disponible en el selector para futuros registros."
+                    )
+                    if dest_sal_txt:
+                        st.info(f"✏️ Destino a registrar: **{dest_sal_txt}**")
+                    dest_final       = dest_sal_txt
                 else:
-                    st.error(msg)
+                    dest_final       = dest_sel
+                    dest_dir         = ""
+                    dest_resp        = ""
+                    guardar_en_lista = False
+
+                cant_sal = st.number_input(
+                    f"Cantidad (máx {int(stock_max)})",
+                    min_value=0.0, max_value=stock_max, step=1.0, key="sal_cant"
+                )
+
+            with col_d:
+                obs_sal = st.text_area(
+                    "Observación", key="sal_obs",
+                    placeholder="Opcional: motivo, número de orden, etc."
+                ).strip()
+
+            if st.button("➕ Agregar a la salida", key="btn_agregar_sal"):
+                if cant_sal <= 0:
+                    st.error("La cantidad debe ser mayor a 0.")
+                elif not dest_final:
+                    st.error("Debes ingresar el nombre del destino.")
+                else:
+                    # Guardar nueva sucursal en catálogo si corresponde
+                    if dest_sel == OPCION_OTRO and guardar_en_lista and dest_final not in lista_suc:
+                        try:
+                            repo.agregar_sucursal(dest_final, dest_dir, dest_resp)
+                            st.session_state.lista_suc = repo.cargar_sucursales()
+                            lista_suc = st.session_state.lista_suc
+                            st.success(f"Sucursal **{dest_final}** agregada al catálogo. ✔")
+                        except Exception as e:
+                            st.warning(f"La salida se guardará, pero no se pudo agregar al catálogo: {e}")
+
+                    venc_str = (
+                        venc_sel.strftime("%d-%m-%Y")
+                        if hasattr(venc_sel, "strftime") else str(venc_sel)
+                    )
+                    st.session_state.carrito_sal.append({
+                        "Código":                      cod_sal,
+                        "Nombre del insumo":           nom_sal,
+                        "Lote":                        lote_sel,
+                        "Cantidad":                    cant_sal,
+                        "Fecha de caducidad asociada": venc_str,
+                        "Destino":                     dest_final,
+                        "Observación":                 obs_sal,
+                        "_venc_raw":                   venc_sel,
+                    })
+                    st.success(f"✔ **{nom_sal}** agregado a la salida.")
+                    st.rerun()
+
+    # ── Tabla del carrito de salidas ──────────────────────────────────────────
+    st.divider()
+    carrito_s = st.session_state.carrito_sal
+
+    if not carrito_s:
+        st.info("📤 Aún no hay ítems en esta salida. Agrega insumos con el formulario de arriba.")
+    else:
+        st.markdown(f"##### 📤 Ítems en esta salida ({len(carrito_s)})")
+
+        cols_header = st.columns([2, 3, 2, 1, 2, 2, 2, 1])
+        for h, label in zip(cols_header, ["Código", "Nombre", "Lote", "Cantidad",
+                                           "Vencimiento", "Destino", "Obs.", ""]):
+            h.markdown(f"**{label}**")
+
+        for i, item in enumerate(carrito_s):
+            c1, c2, c3, c4, c5, c6, c7, c8 = st.columns([2, 3, 2, 1, 2, 2, 2, 1])
+            c1.write(item["Código"])
+            c2.write(item["Nombre del insumo"])
+            c3.write(item["Lote"])
+            c4.write(int(item["Cantidad"]))
+            c5.write(item["Fecha de caducidad asociada"])
+            c6.write(item["Destino"])
+            c7.write(item["Observación"] or "—")
+            if c8.button("🗑️", key=f"del_sal_{i}", help="Eliminar este ítem"):
+                st.session_state.carrito_sal.pop(i)
+                st.rerun()
+
+        # Resumen por insumo y destino
+        st.divider()
+        resumen_s = (
+            pd.DataFrame(carrito_s)[["Nombre del insumo", "Destino", "Cantidad"]]
+            .groupby(["Nombre del insumo", "Destino"])["Cantidad"]
+            .sum()
+            .reset_index()
+            .rename(columns={"Cantidad": "Total a salir"})
+        )
+        col_res_s, col_btn_s = st.columns([3, 1])
+        with col_res_s:
+            with st.expander("📊 Ver resumen por insumo y destino", expanded=False):
+                st.dataframe(resumen_s, use_container_width=True, hide_index=True)
+        with col_btn_s:
+            st.markdown("&nbsp;", unsafe_allow_html=True)
+            if st.button("🗑️ Vaciar salida", key="btn_vaciar_sal"):
+                st.session_state.carrito_sal = []
+                st.rerun()
+
+        # ── Confirmar y guardar todo ───────────────────────────────────────
+        st.divider()
+        if st.button(
+            f"✅ Confirmar salida ({len(carrito_s)} ítem{'s' if len(carrito_s) > 1 else ''})",
+            type="primary", key="btn_confirmar_sal"
+        ):
+            ahora = datetime.now()
+            nuevas_filas = []
+            for item in carrito_s:
+                nuevas_filas.append({
+                    "Fecha":                       ahora,
+                    "Código":                      item["Código"],
+                    "Nombre del insumo":           item["Nombre del insumo"],
+                    "Lote":                        item["Lote"],
+                    "Cantidad":                    item["Cantidad"],
+                    "Fecha de caducidad asociada": item["_venc_raw"],
+                    "Destino":                     item["Destino"],
+                    "Observación":                 item["Observación"],
+                })
+            ok, msg = guardar_y_reportes(
+                pd.concat([df_sal, pd.DataFrame(nuevas_filas)], ignore_index=True),
+                "Salidas"
+            )
+            if ok:
+                st.session_state.carrito_sal = []
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+    # ── Historial de salidas registradas ──────────────────────────────────────
+    st.divider()
+    with st.expander("📋 Ver historial de salidas registradas", expanded=False):
+        if df_sal.empty:
+            st.info("No hay salidas registradas aún.")
+        else:
+            df_hist_s = df_sal.copy()
+            if "Fecha de caducidad asociada" in df_hist_s.columns:
+                df_hist_s["Fecha de caducidad asociada"] = df_hist_s["Fecha de caducidad asociada"].apply(
+                    lambda x: x.strftime("%d-%m-%Y") if hasattr(x, "strftime") else str(x))
+            if "Fecha" in df_hist_s.columns:
+                df_hist_s["Fecha"] = df_hist_s["Fecha"].apply(
+                    lambda x: x.strftime("%d-%m-%Y %H:%M") if hasattr(x, "strftime") else str(x))
+            df_hist_s = df_hist_s.iloc[::-1].reset_index(drop=True)
+            st.dataframe(df_hist_s, use_container_width=True, hide_index=True)
+            buf_hist_s = io.BytesIO()
+            df_hist_s.to_excel(buf_hist_s, index=False)
+            st.download_button(
+                "⬇️ Descargar historial",
+                buf_hist_s.getvalue(),
+                "historial_salidas.xlsx",
+                key="dl_hist_sal",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
 
 # ══════════════════════════════════════════════

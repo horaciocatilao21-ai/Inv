@@ -133,14 +133,33 @@ class StockService:
     def __init__(self, repo: InventarioRepo):
         self.repo = repo
 
+    @staticmethod
+    def _normalizar_fecha(serie: pd.Series) -> pd.Series:
+        """Convierte fechas a string uniforme YYYY-MM-DD o deja el valor tal cual (S/V, etc.)"""
+        def _conv(v):
+            if pd.isna(v):
+                return "S/V"
+            if hasattr(v, "strftime"):
+                return v.strftime("%Y-%m-%d")
+            s = str(v).strip()
+            return s if s else "S/V"
+        return serie.apply(_conv)
+
     def stock_por_lote(self, codigo, df_ing, df_sal):
         codigo = codigo.strip().upper()
         ing    = df_ing[df_ing["Código"] == codigo].copy()
         sal    = df_sal[df_sal["Código"] == codigo].copy()
         if ing.empty:
             return pd.DataFrame()
+
+        # Normalizar tipos para evitar error de merge entre datetime y string
+        ing["Lote"]               = ing["Lote"].astype(str).str.strip().str.upper()
+        ing["Fecha de caducidad"] = StockService._normalizar_fecha(ing["Fecha de caducidad"])
         resumen_ing = ing.groupby(["Lote", "Fecha de caducidad"])["Cantidad"].sum().reset_index()
-        if not sal.empty:
+
+        if not sal.empty and "Fecha de caducidad asociada" in sal.columns:
+            sal["Lote"]                        = sal["Lote"].astype(str).str.strip().str.upper()
+            sal["Fecha de caducidad asociada"] = StockService._normalizar_fecha(sal["Fecha de caducidad asociada"])
             resumen_sal = sal.groupby(
                 ["Lote", "Fecha de caducidad asociada"])["Cantidad"].sum().reset_index()
             resumen_sal.columns = ["Lote", "Fecha de caducidad", "Cant_Salida"]

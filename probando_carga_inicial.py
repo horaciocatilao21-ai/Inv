@@ -4,16 +4,16 @@
 =============================================================
 Persistencia via Google Drive con Service Account.
 No requiere login del usuario.
- 
+
 Archivos necesarios en la misma carpeta:
   - inventario_sa.py        (este archivo)
   - gdrive.py               (módulo de Drive)
   - .streamlit/secrets.toml (credenciales)
- 
+
 secrets.toml:
   [gdrive]
   file_id = "1ABC_XYZ_id_del_archivo"
- 
+
   [gcp_service_account]
   type = "service_account"
   project_id = "mi-proyecto"
@@ -24,7 +24,7 @@ secrets.toml:
   auth_uri = "https://accounts.google.com/o/oauth2/auth"
   token_uri = "https://oauth2.googleapis.com/token"
 """
- 
+
 import shutil
 import io
 import pandas as pd
@@ -32,37 +32,41 @@ import streamlit as st
 from datetime import datetime
 from pathlib import Path
 from gdrive import descargar_excel, subir_excel
- 
+
 HEADER_ROW = 2
 DIR_BACKUP  = "./Backups_Inventario"
- 
- 
+
+
 # ═════════════════════════════════════════════
 # CAPA 1: ACCESO A DATOS
 # ═════════════════════════════════════════════
- 
+
 class InventarioRepo:
     def __init__(self, ruta: str):
         self.ruta = ruta
- 
+
     def cargar_hoja(self, nombre_hoja: str) -> pd.DataFrame:
         df = pd.read_excel(self.ruta, sheet_name=nombre_hoja, skiprows=HEADER_ROW)
         return self._limpiar(df)
- 
-    def cargar_insumos(self)    -> pd.DataFrame: return self.cargar_hoja("Insumos")
-    def cargar_ingresos(self)   -> pd.DataFrame: return self.cargar_hoja("Ingresos")
-    def cargar_salidas(self)    -> pd.DataFrame: return self.cargar_hoja("Salidas")
- 
+
+    def cargar_insumos(self)  -> pd.DataFrame: return self.cargar_hoja("Insumos")
+    def cargar_ingresos(self) -> pd.DataFrame: return self.cargar_hoja("Ingresos")
+    def cargar_salidas(self)  -> pd.DataFrame: return self.cargar_hoja("Salidas")
+
     def cargar_sucursales(self) -> list:
         df = pd.read_excel(self.ruta, sheet_name="Sucursales", skiprows=HEADER_ROW)
+        df.columns = df.columns.str.strip()
+        # Filtrar solo sucursales activas (evita filas vacías con "Activa" en col Estado)
+        if "Estado" in df.columns:
+            df = df[df["Estado"].astype(str).str.strip().str.lower() == "activa"]
         return df["Sucursal"].dropna().unique().tolist()
- 
+
     def guardar_transaccion(self, df: pd.DataFrame, hoja: str):
         with pd.ExcelWriter(
             self.ruta, mode="a", engine="openpyxl", if_sheet_exists="replace"
         ) as w:
             df.to_excel(w, sheet_name=hoja, index=False, startrow=HEADER_ROW)
- 
+
     def guardar_reportes(self, df_lote, df_suc, df_sin):
         with pd.ExcelWriter(
             self.ruta, mode="a", engine="openpyxl", if_sheet_exists="replace"
@@ -72,25 +76,41 @@ class InventarioRepo:
             if df_sin is not None and not df_sin.empty:
                 df_sin.to_excel(w, sheet_name="Stock sin Lote ni Vencimiento",
                                 index=False, startrow=HEADER_ROW)
- 
+
     def hacer_backup(self) -> str:
         Path(DIR_BACKUP).mkdir(parents=True, exist_ok=True)
         ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
         destino = f"{DIR_BACKUP}/{Path(self.ruta).stem}_backup_{ts}.xlsx"
         shutil.copy2(self.ruta, destino)
         return destino
- 
+
+    def agregar_sucursal(self, nombre: str, direccion: str = "", responsable: str = "") -> None:
+        """Agrega una nueva sucursal a la hoja Sucursales con estado Activa."""
+        df = pd.read_excel(self.ruta, sheet_name="Sucursales", skiprows=HEADER_ROW)
+        df.columns = df.columns.str.strip()
+        nueva = pd.DataFrame([{
+            "Sucursal":               nombre.strip(),
+            "Dirección / referencia": direccion.strip(),
+            "Responsable":            responsable.strip(),
+            "Estado":                 "Activa",
+        }])
+        df_nueva = pd.concat([df, nueva], ignore_index=True)
+        with pd.ExcelWriter(
+            self.ruta, mode="a", engine="openpyxl", if_sheet_exists="replace"
+        ) as w:
+            df_nueva.to_excel(w, sheet_name="Sucursales", index=False, startrow=HEADER_ROW)
+
     def leer_archivo_externo(self, archivo) -> pd.DataFrame:
         nombre = archivo.name.lower()
         df = pd.read_csv(archivo, dtype=str) if nombre.endswith(".csv") \
              else pd.read_excel(archivo, dtype=str)
         df.columns = df.columns.str.strip()
         return df
- 
+
     def get_bytes(self) -> bytes:
         with open(self.ruta, "rb") as f:
             return f.read()
- 
+
     @staticmethod
     def _limpiar(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty:
@@ -103,16 +123,16 @@ class InventarioRepo:
         if "Cantidad" in df.columns:
             df["Cantidad"] = pd.to_numeric(df["Cantidad"], errors="coerce").fillna(0)
         return df
- 
- 
+
+
 # ═════════════════════════════════════════════
 # CAPA 2: LÓGICA DE NEGOCIO
 # ═════════════════════════════════════════════
- 
+
 class StockService:
     def __init__(self, repo: InventarioRepo):
         self.repo = repo
- 
+
     def stock_por_lote(self, codigo, df_ing, df_sal):
         codigo = codigo.strip().upper()
         ing    = df_ing[df_ing["Código"] == codigo].copy()
@@ -131,7 +151,7 @@ class StockService:
             df_l = resumen_ing.copy()
             df_l["Disponible"] = df_l["Cantidad"]
         return df_l[df_l["Disponible"] > 0].reset_index(drop=True)
- 
+
     def construir_stock_por_lote(self, df_ing, df_sal):
         ing_ag = df_ing.groupby(
             ["Código", "Nombre del insumo", "Lote", "Fecha de caducidad"]
@@ -144,7 +164,7 @@ class StockService:
         return df.rename(columns={"Cantidad": "Ingresos", "Cant_Salida": "Salidas"})[
             ["Código", "Nombre del insumo", "Lote", "Fecha de caducidad",
              "Ingresos", "Salidas", "Stock disponible"]]
- 
+
     def construir_stock_por_sucursal(self, df_ing, df_sal, df_insumos, lista_suc):
         todos  = df_insumos["Nombre del insumo"].unique()
         t_ing  = df_ing.groupby("Nombre del insumo")["Cantidad"].sum().reindex(todos, fill_value=0)
@@ -167,7 +187,7 @@ class StockService:
         rep["STOCK TOTAL"] = rep["Stock Disponible (Bodega Central)"] + t_env
         return rep[["Stock Disponible (Bodega Central)", "Usado en BC"] + cols_env + ["STOCK TOTAL"]]\
             .fillna(0).reset_index()
- 
+
     def construir_stock_sin_lote(self, df_ing, df_sal, lista_suc):
         ing_sin = df_ing[df_ing["Lote"].isin(["N/A", ""])].copy()
         sal_sin = df_sal[df_sal["Lote"].isin(["N/A", ""])].copy()
@@ -185,7 +205,7 @@ class StockService:
                 rep[f"Enviado a {s}"] = matriz[s] if s in matriz.columns else 0
         rep["STOCK TOTAL SIN LOTE"] = rep.sum(axis=1)
         return rep.fillna(0).reset_index().rename(columns={"index": "Nombre del insumo"})
- 
+
     def validar_e_importar_inicial(self, df_raw, df_insumos):
         faltantes = {"Código", "Cantidad"} - set(df_raw.columns)
         if faltantes:
@@ -221,18 +241,22 @@ class StockService:
             obs_raw   = str(row.get("Observación", "")).strip()
             obs       = obs_raw if obs_raw and obs_raw.upper() != "NAN" else "Inventario inicial"
             filas_ok.append({
-                "Fecha": datetime.now(), "Código": cod,
+                "Fecha":             datetime.now(),
+                "Código":            cod,
                 "Nombre del insumo": nombre_por_codigo[cod],
-                "Lote": lote, "Cantidad": cant,
-                "Fecha de caducidad": venc, "Proveedor": proveedor, "Observación": obs,
+                "Lote":              lote,
+                "Cantidad":          cant,
+                "Fecha de caducidad": venc,
+                "Proveedor":         proveedor,
+                "Observación":       obs,
             })
         return pd.DataFrame(filas_ok), errores
- 
- 
+
+
 # ═════════════════════════════════════════════
 # HELPERS DE SESIÓN
 # ═════════════════════════════════════════════
- 
+
 def init_session():
     """
     Descarga el Excel desde Drive y carga todo en session_state.
@@ -240,7 +264,7 @@ def init_session():
     """
     with st.spinner("Descargando archivo desde Google Drive..."):
         tmp = descargar_excel()
- 
+
     repo = InventarioRepo(tmp)
     st.session_state.update({
         "repo":       repo,
@@ -252,8 +276,8 @@ def init_session():
         "tmp_path":   tmp,
         "cargado":    True,
     })
- 
- 
+
+
 def guardar_y_reportes(df_nuevo: pd.DataFrame, hoja: str):
     """
     1. Backup local
@@ -263,25 +287,25 @@ def guardar_y_reportes(df_nuevo: pd.DataFrame, hoja: str):
     """
     repo     = st.session_state.repo
     servicio = st.session_state.servicio
- 
+
     # Backup local preventivo
     try:
         st.info(f"Backup local creado: `{repo.hacer_backup()}`")
     except Exception as e:
         st.warning(f"No se pudo crear backup local: {e}")
- 
+
     # Guardar transacción
     try:
         repo.guardar_transaccion(df_nuevo, hoja)
     except Exception as e:
         return False, f"Error al guardar '{hoja}': {e}"
- 
+
     # Recargar en memoria
     df_ing_n = repo.cargar_ingresos()
     df_sal_n = repo.cargar_salidas()
     st.session_state.df_ing = df_ing_n
     st.session_state.df_sal = df_sal_n
- 
+
     # Reportes
     try:
         repo.guardar_reportes(
@@ -294,29 +318,29 @@ def guardar_y_reportes(df_nuevo: pd.DataFrame, hoja: str):
         )
     except Exception as e:
         return False, f"Transacción guardada pero error en reportes: {e}"
- 
+
     # Subir a Drive
     try:
         with st.spinner("Sincronizando con Google Drive..."):
             subir_excel(st.session_state.tmp_path)
     except Exception as e:
         return False, f"Guardado localmente pero error al subir a Drive: {e}"
- 
+
     return True, "¡Cambios guardados y sincronizados con Google Drive! ☁️"
- 
- 
+
+
 # ═════════════════════════════════════════════
 # APP
 # ═════════════════════════════════════════════
- 
+
 st.set_page_config(
     page_title="LMN Bicentenario — Inventario",
     page_icon="📦",
     layout="wide",
 )
- 
+
 st.title("📦 LMN Bicentenario — Sistema de Inventario")
- 
+
 # ── Carga automática al primer acceso ────────────────────────────────────────
 if not st.session_state.get("cargado"):
     try:
@@ -327,7 +351,7 @@ if not st.session_state.get("cargado"):
         st.caption("Verifica que el `secrets.toml` esté configurado correctamente "
                    "y que el archivo de Drive esté compartido con la Service Account.")
         st.stop()
- 
+
 # Atajos
 repo       = st.session_state.repo
 servicio   = st.session_state.servicio
@@ -335,7 +359,7 @@ df_insumos = st.session_state.df_insumos
 lista_suc  = st.session_state.lista_suc
 df_ing     = st.session_state.df_ing
 df_sal     = st.session_state.df_sal
- 
+
 # ── Barra lateral ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("☁️ Google Drive")
@@ -345,7 +369,7 @@ with st.sidebar:
     st.caption(f"Ingresos registrados: {len(df_ing)}")
     st.caption(f"Salidas registradas: {len(df_sal)}")
     st.divider()
- 
+
     if st.button("🔄 Recargar desde Drive"):
         try:
             init_session()
@@ -353,14 +377,14 @@ with st.sidebar:
             st.rerun()
         except Exception as e:
             st.error(f"Error al recargar: {e}")
- 
+
     st.download_button(
         "⬇️ Descargar copia local",
         data=repo.get_bytes(),
         file_name="inventario_copia_local.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
- 
+
 # ── Pestañas ──────────────────────────────────────────────────────────────────
 tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes = st.tabs([
     "🔍 Consultar Stock",
@@ -369,8 +393,8 @@ tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes = st.tabs([
     "📂 Carga Inicial",
     "📊 Reportes",
 ])
- 
- 
+
+
 # ══════════════════════════════════════════════
 # TAB 1 — CONSULTAR STOCK
 # ══════════════════════════════════════════════
@@ -404,8 +428,8 @@ with tab_consulta:
                 with col2: st.metric("Total disponible", int(lotes["Disponible"].sum()))
                 st.dataframe(ld[["Lote", "Fecha de caducidad", "Disponible"]],
                              use_container_width=True, hide_index=True)
- 
- 
+
+
 # ══════════════════════════════════════════════
 # TAB 2 — REGISTRAR INGRESO
 # ══════════════════════════════════════════════
@@ -430,26 +454,32 @@ with tab_ingreso:
             st.error("La cantidad debe ser mayor a 0.")
         else:
             fila = {
-                "Fecha": datetime.now(), "Código": cod_ing, "Nombre del insumo": nom_ing,
-                "Lote": lote_ing, "Cantidad": cant_ing, "Fecha de caducidad": venc_ing,
-                "Proveedor": prov_ing, "Observación": obs_ing,
+                "Fecha":             datetime.now(),
+                "Código":            cod_ing,
+                "Nombre del insumo": nom_ing,
+                "Lote":              lote_ing,
+                "Cantidad":          cant_ing,
+                "Fecha de caducidad": venc_ing,
+                "Proveedor":         prov_ing,
+                "Observación":       obs_ing,
             }
             ok, msg = guardar_y_reportes(
                 pd.concat([df_ing, pd.DataFrame([fila])], ignore_index=True), "Ingresos")
             if ok:  st.success(msg); st.rerun()
             else:   st.error(msg)
- 
- 
+
+
 # ══════════════════════════════════════════════
 # TAB 3 — REGISTRAR SALIDA
 # ══════════════════════════════════════════════
 with tab_salida:
     st.subheader("Registrar salida de insumo")
-    opts_sal  = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
-                 for _, r in df_insumos.iterrows()}
-    sel_sal   = st.selectbox("Insumo", list(opts_sal.keys()), key="sal_insumo")
-    cod_sal   = opts_sal[sel_sal]
-    nom_sal   = df_insumos[df_insumos["Código"] == cod_sal].iloc[0]["Nombre del insumo"]
+    opts_sal = {f"{r['Código']} — {r['Nombre del insumo']}": r["Código"]
+                for _, r in df_insumos.iterrows()}
+    sel_sal  = st.selectbox("Insumo", list(opts_sal.keys()), key="sal_insumo")
+    cod_sal  = opts_sal[sel_sal]
+    nom_sal  = df_insumos[df_insumos["Código"] == cod_sal].iloc[0]["Nombre del insumo"]
+
     lotes_sal = servicio.stock_por_lote(cod_sal, df_ing, df_sal)
     if lotes_sal.empty:
         st.warning("Sin stock disponible para este insumo.")
@@ -465,30 +495,99 @@ with tab_salida:
         stock_max = float(lotes_sal.loc[idx_lote, "Disponible"])
         lote_sel  = lotes_sal.loc[idx_lote, "Lote"]
         venc_sel  = lotes_sal.loc[idx_lote, "Fecha de caducidad"]
+
+        st.divider()
         col_c, col_d = st.columns(2)
         with col_c:
-            dest_sal = st.selectbox("Destino", lista_suc, key="sal_destino")
+            # ── Selector de destino ────────────────────────────────────────
+            OPCION_OTRO = "➕ Agregar nuevo destino..."
+            # Excluir Bodega Central: las salidas van HACIA sucursales externas
+            suc_destino = [s for s in lista_suc if s != "Bodega Central"] + [OPCION_OTRO]
+            dest_sel = st.selectbox(
+                "Destino / Sucursal",
+                suc_destino,
+                key="sal_destino",
+                help="Selecciona la sucursal destino. "
+                     "Si no aparece en la lista, elige '➕ Agregar nuevo destino...'"
+            )
+
+            if dest_sel == OPCION_OTRO:
+                st.markdown("##### ✏️ Nueva sucursal / destino")
+                dest_sal  = st.text_input(
+                    "Nombre *",
+                    key="sal_nuevo_nombre",
+                    placeholder="Ej: Sucursal Norte"
+                ).strip()
+                dest_dir  = st.text_input(
+                    "Dirección / referencia (opcional)",
+                    key="sal_nuevo_dir",
+                    placeholder="Ej: Av. Principal 123"
+                ).strip()
+                dest_resp = st.text_input(
+                    "Responsable (opcional)",
+                    key="sal_nuevo_resp",
+                    placeholder="Ej: Juan Pérez"
+                ).strip()
+                guardar_en_lista = st.checkbox(
+                    "Guardar en el catálogo de sucursales",
+                    value=True,
+                    key="sal_guardar_suc",
+                    help="Quedará disponible en el selector para futuros registros."
+                )
+                if dest_sal:
+                    st.info(f"✏️ Destino a registrar: **{dest_sal}**")
+            else:
+                dest_sal         = dest_sel
+                dest_dir         = ""
+                dest_resp        = ""
+                guardar_en_lista = False
+
             cant_sal = st.number_input(
                 f"Cantidad (máx {int(stock_max)})",
                 min_value=0.0, max_value=stock_max, step=1.0, key="sal_cant")
+
         with col_d:
-            obs_sal = st.text_area("Observación", key="sal_obs").strip()
+            obs_sal = st.text_area(
+                "Observación", key="sal_obs",
+                placeholder="Opcional: motivo, número de orden, etc."
+            ).strip()
+
         if st.button("✅ Guardar salida", type="primary", key="btn_sal"):
             if cant_sal <= 0:
                 st.error("La cantidad debe ser mayor a 0.")
+            elif not dest_sal:
+                st.error("Debes ingresar el nombre del destino.")
             else:
+                # Guardar nueva sucursal en catálogo si el usuario lo indicó
+                if dest_sel == OPCION_OTRO and guardar_en_lista and dest_sal not in lista_suc:
+                    try:
+                        repo.agregar_sucursal(dest_sal, dest_dir, dest_resp)
+                        st.session_state.lista_suc = repo.cargar_sucursales()
+                        lista_suc = st.session_state.lista_suc
+                        st.success(f"Sucursal **{dest_sal}** agregada al catálogo. ✔")
+                    except Exception as e:
+                        st.warning(
+                            f"La salida se guardará, pero no se pudo agregar al catálogo: {e}")
+
                 fila = {
-                    "Fecha": datetime.now(), "Código": cod_sal, "Nombre del insumo": nom_sal,
-                    "Lote": lote_sel, "Cantidad": cant_sal,
+                    "Fecha":                       datetime.now(),
+                    "Código":                      cod_sal,
+                    "Nombre del insumo":           nom_sal,
+                    "Lote":                        lote_sel,
+                    "Cantidad":                    cant_sal,
                     "Fecha de caducidad asociada": venc_sel,
-                    "Destino": dest_sal, "Observación": obs_sal,
+                    "Destino":                     dest_sal,
+                    "Observación":                 obs_sal,
                 }
                 ok, msg = guardar_y_reportes(
                     pd.concat([df_sal, pd.DataFrame([fila])], ignore_index=True), "Salidas")
-                if ok:  st.success(msg); st.rerun()
-                else:   st.error(msg)
- 
- 
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+
 # ══════════════════════════════════════════════
 # TAB 4 — CARGA INICIAL
 # ══════════════════════════════════════════════
@@ -524,15 +623,15 @@ with tab_carga:
                         st.error(msg)
         except Exception as e:
             st.error(f"Error al procesar el archivo: {e}")
- 
- 
+
+
 # ══════════════════════════════════════════════
 # TAB 5 — REPORTES
 # ══════════════════════════════════════════════
 with tab_reportes:
     st.subheader("Reportes de stock")
     r1, r2, r3 = st.tabs(["Stock por lote", "Stock por sucursal", "Sin lote"])
- 
+
     with r1:
         df_l = servicio.construir_stock_por_lote(df_ing, df_sal)
         st.dataframe(df_l, use_container_width=True, hide_index=True)
@@ -540,7 +639,7 @@ with tab_reportes:
         st.download_button("⬇️ Descargar", buf.getvalue(), "stock_por_lote.xlsx",
                            key="dl_lote",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
- 
+
     with r2:
         df_s = servicio.construir_stock_por_sucursal(df_ing, df_sal, df_insumos, lista_suc)
         st.dataframe(df_s, use_container_width=True, hide_index=True)
@@ -548,7 +647,7 @@ with tab_reportes:
         st.download_button("⬇️ Descargar", buf2.getvalue(), "stock_por_sucursal.xlsx",
                            key="dl_suc",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
- 
+
     with r3:
         df_sin = servicio.construir_stock_sin_lote(df_ing, df_sal, lista_suc)
         if df_sin is None or df_sin.empty:

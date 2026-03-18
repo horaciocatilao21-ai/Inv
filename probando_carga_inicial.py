@@ -461,14 +461,64 @@ with st.sidebar:
         st.success("✅ Sin vencimientos críticos (30 días)")
 
 # ── Pestañas ──────────────────────────────────────────────────────────────────
-tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes, tab_alertas = st.tabs([
+tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes, tab_alertas, tab_sucursales = st.tabs([
     "🔍 Consultar Stock",
     "➕ Registrar Ingreso",
     "➖ Registrar Salida",
     "📂 Carga Inicial",
     "📊 Reportes",
     "⚠️ Alertas",
+    "🏢 Sucursales",
 ])
+
+
+# ══════════════════════════════════════════════
+# DASHBOARD — resumen al inicio de cada tab
+# ══════════════════════════════════════════════
+def render_dashboard(df_ing, df_sal, df_insumos, servicio, lista_suc):
+    hoy     = now_chile().strftime("%d-%m-%Y")
+    hoy_ts  = pd.Timestamp(now_chile().date())
+
+    # Métricas generales
+    total_insumos   = len(df_insumos)
+    total_ing       = int(df_ing["Cantidad"].sum()) if not df_ing.empty and "Cantidad" in df_ing.columns else 0
+    total_sal       = int(df_sal["Cantidad"].sum()) if not df_sal.empty and "Cantidad" in df_sal.columns else 0
+
+    # Movimientos de hoy
+    def _mov_hoy(df):
+        if df.empty or "Fecha" not in df.columns: return 0
+        fechas = pd.to_datetime(df["Fecha"], errors="coerce")
+        return int(df[fechas.dt.date == hoy_ts.date()]["Cantidad"].sum())
+
+    ing_hoy = _mov_hoy(df_ing)
+    sal_hoy = _mov_hoy(df_sal)
+
+    # Vencimientos críticos (≤ 15 días)
+    df_venc_dash = servicio.vencimientos_proximos(df_ing, df_sal, dias=60)
+    criticos_dash = len(df_venc_dash[df_venc_dash["Estado"] == "🔴 Crítico"]) if not df_venc_dash.empty else 0
+    urgentes_dash = len(df_venc_dash[df_venc_dash["Estado"] == "🟠 Urgente"]) if not df_venc_dash.empty else 0
+
+    # Lotes activos (stock > 0)
+    df_lotes_dash = servicio.construir_stock_por_lote(df_ing, df_sal) if not df_ing.empty else pd.DataFrame()
+    lotes_activos = int((df_lotes_dash["Stock disponible"] > 0).sum()) if not df_lotes_dash.empty else 0
+
+    st.markdown(f"#### 📊 Resumen del día — {hoy}")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("📦 Insumos registrados", total_insumos)
+    c2.metric("🗂️ Lotes activos",       lotes_activos)
+    c3.metric("📥 Ingresado hoy",        ing_hoy)
+    c4.metric("📤 Despachado hoy",       sal_hoy)
+    c5.metric("🔴 Lotes críticos",       criticos_dash,
+              delta="vencen ≤ 15 días" if criticos_dash else None,
+              delta_color="inverse")
+    c6.metric("🟠 Lotes urgentes",       urgentes_dash,
+              delta="vencen ≤ 30 días" if urgentes_dash else None,
+              delta_color="inverse")
+    st.divider()
+
+
+# Renderizar dashboard en la parte superior de la app
+render_dashboard(df_ing, df_sal, df_insumos, servicio, lista_suc)
 
 
 # ══════════════════════════════════════════════
@@ -609,33 +659,67 @@ with tab_ingreso:
 
         # ── Confirmar y guardar todo ───────────────────────────────────────────
         st.divider()
-        if st.button(
-            f"✅ Confirmar ingreso ({len(carrito)} ítem{'s' if len(carrito) > 1 else ''})",
-            type="primary", key="btn_confirmar_ing"
-        ):
-            ahora = now_chile()
-            nuevas_filas = []
-            for item in carrito:
-                nuevas_filas.append({
-                    "Fecha":              ahora,
-                    "Código":             item["Código"],
-                    "Nombre del insumo":  item["Nombre del insumo"],
-                    "Lote":               item["Lote"],
-                    "Cantidad":           item["Cantidad"],
-                    "Fecha de caducidad": item["_venc_raw"],
-                    "Proveedor":          item["Proveedor"],
-                    "Observación":        item["Observación"],
-                })
-            ok, msg = guardar_y_reportes(
-                pd.concat([df_ing, pd.DataFrame(nuevas_filas)], ignore_index=True),
-                "Ingresos"
-            )
-            if ok:
-                st.session_state.carrito_ing = []
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
+        col_confirm_ing, col_cancel_ing = st.columns([2, 1])
+        with col_confirm_ing:
+            if st.button(
+                f"✅ Confirmar ingreso ({len(carrito)} ítem{'s' if len(carrito) > 1 else ''})",
+                type="primary", key="btn_confirmar_ing"
+            ):
+                st.session_state["mostrar_modal_ing"] = True
+
+        if st.session_state.get("mostrar_modal_ing"):
+            with st.container(border=True):
+                st.markdown("### 📋 Confirmar registro de ingreso")
+                st.caption(f"🕐 Fecha y hora de registro: **{now_chile().strftime('%d-%m-%Y %H:%M')}**")
+                st.divider()
+
+                # Tabla resumen del carrito
+                df_prev_ing = pd.DataFrame([{
+                    "Código":            i["Código"],
+                    "Nombre del insumo": i["Nombre del insumo"],
+                    "Lote":              i["Lote"],
+                    "Cantidad":          int(i["Cantidad"]),
+                    "Vencimiento":       i["Fecha de caducidad"],
+                    "Proveedor":         i["Proveedor"] or "—",
+                    "Observación":       i["Observación"] or "—",
+                } for i in carrito])
+                st.dataframe(df_prev_ing, use_container_width=True, hide_index=True)
+
+                total_units_ing = int(sum(i["Cantidad"] for i in carrito))
+                st.info(f"**{len(carrito)} ítem(s)** — **{total_units_ing} unidades** en total")
+                st.divider()
+
+                btn_ok_ing, btn_cancel_ing = st.columns(2)
+                with btn_ok_ing:
+                    if st.button("✅ Sí, registrar ingreso", type="primary", key="btn_ok_ing"):
+                        ahora = now_chile()
+                        nuevas_filas = []
+                        for item in carrito:
+                            nuevas_filas.append({
+                                "Fecha":              ahora,
+                                "Código":             item["Código"],
+                                "Nombre del insumo":  item["Nombre del insumo"],
+                                "Lote":               item["Lote"],
+                                "Cantidad":           item["Cantidad"],
+                                "Fecha de caducidad": item["_venc_raw"],
+                                "Proveedor":          item["Proveedor"],
+                                "Observación":        item["Observación"],
+                            })
+                        ok, msg = guardar_y_reportes(
+                            pd.concat([df_ing, pd.DataFrame(nuevas_filas)], ignore_index=True),
+                            "Ingresos"
+                        )
+                        if ok:
+                            st.session_state.carrito_ing = []
+                            st.session_state["mostrar_modal_ing"] = False
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                with btn_cancel_ing:
+                    if st.button("✏️ Volver a editar", key="btn_cancel_ing"):
+                        st.session_state["mostrar_modal_ing"] = False
+                        st.rerun()
 
     # ── Historial de ingresos registrados ─────────────────────────────────────
     st.divider()
@@ -862,7 +946,6 @@ with tab_salida:
             df_sal_actual = repo.cargar_salidas()
             errores_stock = []
 
-            # Agrupar carrito por (Código, Lote) para validar totales
             from collections import defaultdict
             totales_carrito = defaultdict(float)
             for item in carrito_s:
@@ -893,29 +976,64 @@ with tab_salida:
                     st.markdown(e)
                 st.warning("Edita el carrito antes de confirmar.")
             else:
-                ahora = now_chile()
-                nuevas_filas = []
-                for item in carrito_s:
-                    nuevas_filas.append({
-                        "Fecha":                       ahora,
-                        "Código":                      item["Código"],
-                        "Nombre del insumo":           item["Nombre del insumo"],
-                        "Lote":                        item["Lote"],
-                        "Cantidad":                    item["Cantidad"],
-                        "Fecha de caducidad asociada": item["_venc_raw"],
-                        "Destino":                     item["Destino"],
-                        "Observación":                 item["Observación"],
-                    })
-                ok, msg = guardar_y_reportes(
-                    pd.concat([df_sal, pd.DataFrame(nuevas_filas)], ignore_index=True),
-                    "Salidas"
+                st.session_state["mostrar_modal_sal"] = True
+
+        if st.session_state.get("mostrar_modal_sal"):
+            with st.container(border=True):
+                st.markdown("### 📋 Confirmar registro de salida")
+                st.caption(f"🕐 Fecha y hora de registro: **{now_chile().strftime('%d-%m-%Y %H:%M')}**")
+                st.divider()
+
+                df_prev_sal = pd.DataFrame([{
+                    "Código":            i["Código"],
+                    "Nombre del insumo": i["Nombre del insumo"],
+                    "Lote":              i["Lote"],
+                    "Cantidad":          int(i["Cantidad"]),
+                    "Vencimiento":       i["Fecha de caducidad asociada"],
+                    "Destino":           i["Destino"],
+                    "Observación":       i["Observación"] or "—",
+                } for i in carrito_s])
+                st.dataframe(df_prev_sal, use_container_width=True, hide_index=True)
+
+                total_units_sal = int(sum(i["Cantidad"] for i in carrito_s))
+                destinos_sal    = list({i["Destino"] for i in carrito_s})
+                st.info(
+                    f"**{len(carrito_s)} ítem(s)** — **{total_units_sal} unidades** "
+                    f"hacia: {', '.join(destinos_sal)}"
                 )
-                if ok:
-                    st.session_state.carrito_sal = []
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
+                st.divider()
+
+                btn_ok_sal, btn_cancel_sal = st.columns(2)
+                with btn_ok_sal:
+                    if st.button("✅ Sí, registrar salida", type="primary", key="btn_ok_sal"):
+                        ahora = now_chile()
+                        nuevas_filas = []
+                        for item in carrito_s:
+                            nuevas_filas.append({
+                                "Fecha":                       ahora,
+                                "Código":                      item["Código"],
+                                "Nombre del insumo":           item["Nombre del insumo"],
+                                "Lote":                        item["Lote"],
+                                "Cantidad":                    item["Cantidad"],
+                                "Fecha de caducidad asociada": item["_venc_raw"],
+                                "Destino":                     item["Destino"],
+                                "Observación":                 item["Observación"],
+                            })
+                        ok, msg = guardar_y_reportes(
+                            pd.concat([df_sal, pd.DataFrame(nuevas_filas)], ignore_index=True),
+                            "Salidas"
+                        )
+                        if ok:
+                            st.session_state.carrito_sal = []
+                            st.session_state["mostrar_modal_sal"] = False
+                            st.success(msg)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                with btn_cancel_sal:
+                    if st.button("✏️ Volver a editar", key="btn_cancel_sal"):
+                        st.session_state["mostrar_modal_sal"] = False
+                        st.rerun()
 
     # ── Historial de salidas registradas ──────────────────────────────────────
     st.divider()
@@ -1214,3 +1332,135 @@ with tab_reportes:
                 key="dl_rep_sal",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
+# ══════════════════════════════════════════════
+# TAB 7 — GESTIÓN DE SUCURSALES
+# ══════════════════════════════════════════════
+with tab_sucursales:
+    st.subheader("🏢 Gestión de sucursales")
+
+    # ── Tabla de sucursales actuales ──────────────────────────────────────────
+    try:
+        import openpyxl as _oxl
+        df_suc_full = pd.read_excel(repo.ruta, sheet_name="Sucursales", skiprows=HEADER_ROW)
+        df_suc_full.columns = df_suc_full.columns.str.strip()
+        # Limpiar filas completamente vacías
+        df_suc_full = df_suc_full.dropna(subset=["Sucursal"]).reset_index(drop=True)
+    except Exception as e:
+        st.error(f"No se pudo cargar la hoja de sucursales: {e}")
+        df_suc_full = pd.DataFrame()
+
+    if not df_suc_full.empty:
+        activas   = df_suc_full[df_suc_full["Estado"].astype(str).str.strip().str.lower() == "activa"]
+        inactivas = df_suc_full[df_suc_full["Estado"].astype(str).str.strip().str.lower() != "activa"]
+
+        ms1, ms2 = st.columns(2)
+        ms1.metric("✅ Sucursales activas",   len(activas))
+        ms2.metric("🚫 Inactivas / archivadas", len(inactivas))
+
+        st.divider()
+        st.markdown("##### Listado de sucursales")
+
+        # Editar estado directamente en tabla
+        cols_mostrar = [c for c in ["Sucursal", "Dirección / referencia", "Responsable", "Estado"]
+                        if c in df_suc_full.columns]
+        df_editable = df_suc_full[cols_mostrar].copy()
+
+        # Mostrar por estado con colores
+        def _color_suc(row):
+            if str(row.get("Estado", "")).strip().lower() == "activa":
+                return ["background-color: #1a3a1a"] * len(row)
+            return ["background-color: #3a1a1a"] * len(row)
+
+        st.dataframe(
+            df_editable.style.apply(_color_suc, axis=1),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.divider()
+
+    # ── Agregar nueva sucursal ────────────────────────────────────────────────
+    with st.container(border=True):
+        st.markdown("##### ➕ Agregar nueva sucursal")
+        ns1, ns2 = st.columns(2)
+        with ns1:
+            nueva_suc_nombre = st.text_input(
+                "Nombre de la sucursal *", key="ns_nombre",
+                placeholder="Ej: Sucursal Norte").strip()
+            nueva_suc_dir = st.text_input(
+                "Dirección / referencia", key="ns_dir",
+                placeholder="Ej: Av. Principal 123").strip()
+        with ns2:
+            nueva_suc_resp = st.text_input(
+                "Responsable", key="ns_resp",
+                placeholder="Ej: Juan Pérez").strip()
+            nueva_suc_estado = st.selectbox(
+                "Estado inicial", ["Activa", "Inactiva"], key="ns_estado")
+
+        if st.button("💾 Guardar nueva sucursal", type="primary", key="btn_nueva_suc"):
+            if not nueva_suc_nombre:
+                st.error("El nombre de la sucursal es obligatorio.")
+            elif not df_suc_full.empty and nueva_suc_nombre in df_suc_full["Sucursal"].values:
+                st.warning(f"Ya existe una sucursal con el nombre **{nueva_suc_nombre}**.")
+            else:
+                try:
+                    df_suc_act = pd.read_excel(repo.ruta, sheet_name="Sucursales", skiprows=HEADER_ROW)
+                    df_suc_act.columns = df_suc_act.columns.str.strip()
+                    nueva_fila = pd.DataFrame([{
+                        "Sucursal":               nueva_suc_nombre,
+                        "Dirección / referencia": nueva_suc_dir,
+                        "Responsable":            nueva_suc_resp,
+                        "Estado":                 nueva_suc_estado,
+                    }])
+                    df_suc_nueva = pd.concat([df_suc_act, nueva_fila], ignore_index=True)
+                    with pd.ExcelWriter(
+                        repo.ruta, mode="a", engine="openpyxl", if_sheet_exists="replace"
+                    ) as w:
+                        df_suc_nueva.to_excel(
+                            w, sheet_name="Sucursales", index=False, startrow=HEADER_ROW)
+                    # Subir a Drive
+                    with st.spinner("Sincronizando con Google Drive..."):
+                        subir_excel(st.session_state.tmp_path)
+                    st.session_state.lista_suc = repo.cargar_sucursales()
+                    st.success(f"✅ Sucursal **{nueva_suc_nombre}** agregada correctamente.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error al guardar: {e}")
+
+    st.divider()
+
+    # ── Cambiar estado de una sucursal ────────────────────────────────────────
+    if not df_suc_full.empty:
+        with st.container(border=True):
+            st.markdown("##### ✏️ Cambiar estado de una sucursal")
+            nombres_suc = df_suc_full["Sucursal"].dropna().tolist()
+            suc_editar  = st.selectbox("Selecciona sucursal", nombres_suc, key="suc_editar_sel")
+            estado_actual = df_suc_full[df_suc_full["Sucursal"] == suc_editar]["Estado"].values
+            estado_actual = str(estado_actual[0]).strip() if len(estado_actual) > 0 else "Activa"
+            nuevo_estado  = st.selectbox(
+                "Nuevo estado",
+                ["Activa", "Inactiva"],
+                index=0 if estado_actual.lower() == "activa" else 1,
+                key="suc_nuevo_estado"
+            )
+            if st.button("💾 Actualizar estado", key="btn_upd_suc"):
+                if nuevo_estado == estado_actual:
+                    st.info("El estado ya es el mismo, no hay cambios.")
+                else:
+                    try:
+                        df_suc_upd = pd.read_excel(repo.ruta, sheet_name="Sucursales", skiprows=HEADER_ROW)
+                        df_suc_upd.columns = df_suc_upd.columns.str.strip()
+                        df_suc_upd.loc[df_suc_upd["Sucursal"] == suc_editar, "Estado"] = nuevo_estado
+                        with pd.ExcelWriter(
+                            repo.ruta, mode="a", engine="openpyxl", if_sheet_exists="replace"
+                        ) as w:
+                            df_suc_upd.to_excel(
+                                w, sheet_name="Sucursales", index=False, startrow=HEADER_ROW)
+                        with st.spinner("Sincronizando con Google Drive..."):
+                            subir_excel(st.session_state.tmp_path)
+                        st.session_state.lista_suc = repo.cargar_sucursales()
+                        st.success(f"✅ **{suc_editar}** actualizada a **{nuevo_estado}**.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error al actualizar: {e}")

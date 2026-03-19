@@ -1756,165 +1756,72 @@ with tab_sucursales:
                         st.error(f"Error al actualizar: {e}")
 
 # ══════════════════════════════════════════════
-# TAB 8 — CARGAR DESDE DOCUMENTO (OCR con Claude Vision)
+# TAB 8 — CARGAR DESDE DOCUMENTO (Cloud Vision)
 # ══════════════════════════════════════════════
 with tab_ocr:
     st.subheader("📄 Cargar insumos desde documento")
     st.markdown(
-        "Sube una **foto o PDF** de una guía de despacho, factura o formulario de pedido. "
-        "Claude Vision extraerá automáticamente los insumos, cantidades, lotes y fechas de vencimiento."
+        "Sube una **foto o PDF** de una guía de despacho o factura. "
+        "Google Cloud Vision extraerá automáticamente los códigos, "
+        "cantidades, lotes y fechas de vencimiento."
     )
-
-    # ── API Key ────────────────────────────────────────────────────────────────
-    api_key_ocr = st.secrets.get("anthropic", {}).get("api_key", "")
-    if not api_key_ocr:
-        api_key_ocr = st.text_input(
-            "🔑 API Key de Anthropic (si no está en secrets.toml)",
-            type="password",
-            key="ocr_api_key",
-            help="Consíguela en https://console.anthropic.com"
-        ).strip()
-
-    # ── Uploader ──────────────────────────────────────────────────────────────
-    archivo_ocr = st.file_uploader(
-        "Sube la imagen o PDF del documento",
-        type=["jpg", "jpeg", "png", "webp", "pdf"],
-        key="up_ocr"
-    )
-
-    if archivo_ocr and api_key_ocr:
-
-        # Mostrar preview de la imagen
-        if archivo_ocr.type != "application/pdf":
-            st.image(archivo_ocr, caption="Documento cargado", use_container_width=True)
-        else:
-            st.info("📄 PDF cargado correctamente.")
-
-        if st.button("🔍 Extraer datos del documento", type="primary", key="btn_ocr"):
-            with st.spinner("Claude Vision está analizando el documento..."):
-                try:
-                    # Convertir archivo a base64
-                    archivo_ocr.seek(0)
-                    raw_bytes = archivo_ocr.read()
-                    b64_data  = base64.standard_b64encode(raw_bytes).decode("utf-8")
-
-                    # Determinar media_type
-                    tipo_map = {
-                        "image/jpeg": "image/jpeg",
-                        "image/png":  "image/png",
-                        "image/webp": "image/webp",
-                        "application/pdf": "application/pdf",
-                    }
-                    media_type = tipo_map.get(archivo_ocr.type, "image/jpeg")
-
-                    # Construir el bloque de contenido según el tipo
-                    if media_type == "application/pdf":
-                        source_block = {
-                            "type": "base64",
-                            "media_type": "application/pdf",
-                            "data": b64_data,
-                        }
-                        content_source_type = "document"
-                    else:
-                        source_block = {
-                            "type":       "base64",
-                            "media_type": media_type,
-                            "data":       b64_data,
-                        }
-                        content_source_type = "image"
-
-                    # Catálogo de insumos para ayudar al cruce
-                    catalogo_txt = "\n".join(
-                        f"{r['Código']}: {r['Nombre del insumo']}"
-                        for _, r in df_insumos.iterrows()
-                    )
-
-                    prompt = f"""Analiza este documento (guía de despacho, factura o formulario de pedido de insumos médicos) y extrae todos los productos/insumos que aparecen.
-
-Catálogo de insumos disponibles en el sistema (Código: Nombre):
-{catalogo_txt}
-
-Instrucciones:
-1. Identifica cada ítem con su cantidad, lote y fecha de caducidad si aparecen.
-2. Intenta hacer corresponder cada ítem del documento con el código del catálogo. Si no encuentras coincidencia exacta, usa el código más parecido. Si no hay ninguno relacionado, deja el código vacío.
-3. Las fechas de caducidad conviértelas al formato DD-MM-YYYY.
-4. Si el lote no aparece, deja el campo vacío.
-5. Responde SOLO con un JSON válido, sin texto adicional, sin comillas de markdown, con esta estructura exacta:
-
-{{
-  "items": [
-    {{
-      "codigo": "IS02",
-      "nombre": "AGUJA MÚLTIPLE 21 G",
-      "cantidad": 6,
-      "lote": "250808",
-      "fecha_caducidad": "07-08-2030"
-    }}
-  ],
-  "sucursal_origen": "CESFAM PADRE ORELLANA",
-  "fecha_documento": "19-03-2026",
-  "numero_documento": "3160"
-}}"""
-
-                    # Llamada a la API de Anthropic
-                    payload = {
-                        "model": "claude-opus-4-5",
-                        "max_tokens": 2000,
-                        "messages": [{
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": content_source_type,
-                                    "source": source_block,
-                                },
-                                {
-                                    "type": "text",
-                                    "text": prompt,
-                                }
-                            ]
-                        }]
-                    }
-
-                    resp = requests.post(
-                        "https://api.anthropic.com/v1/messages",
-                        headers={
-                            "x-api-key":         api_key_ocr,
-                            "anthropic-version": "2023-06-01",
-                            "content-type":      "application/json",
-                        },
-                        json=payload,
-                        timeout=60,
-                    )
-                    resp.raise_for_status()
-                    resp_data = resp.json()
-
-                    # Extraer texto de la respuesta
-                    texto_resp = ""
-                    for bloque in resp_data.get("content", []):
-                        if bloque.get("type") == "text":
-                            texto_resp += bloque["text"]
-
-                    # Limpiar posibles backticks de markdown
-                    texto_limpio = texto_resp.strip()
-                    if texto_limpio.startswith("```"):
-                        texto_limpio = texto_limpio.split("```")[1]
-                        if texto_limpio.startswith("json"):
-                            texto_limpio = texto_limpio[4:]
-
-                    datos = json.loads(texto_limpio)
-                    st.session_state["ocr_resultado"] = datos
-                    st.success("✅ Documento analizado correctamente.")
-
-                except requests.exceptions.HTTPError as e:
-                    st.error(f"Error de API: {e.response.status_code} — {e.response.text}")
-                except json.JSONDecodeError as e:
-                    st.error(f"Error al interpretar la respuesta de Claude: {e}")
-                    st.code(texto_resp, language="text")
-                except Exception as e:
-                    st.error(f"Error inesperado: {e}")
-
-    elif archivo_ocr and not api_key_ocr:
-        st.warning("⚠️ Ingresa tu API Key de Anthropic para procesar el documento.")
+    st.caption("✅ Usa Google Cloud Vision — **1.000 imágenes/mes gratis** con tu Service Account actual.")
+ 
+    # Importar módulo OCR
+    try:
+        from ocr_vision import extraer_texto_imagen, extraer_texto_pdf, parsear_guia_despacho
+        ocr_disponible = True
+    except ImportError as e:
+        st.error(
+            f"Módulo OCR no disponible: {e}\n\n"
+            "Asegúrate de que `ocr_vision.py` está en la carpeta y de haber instalado: "
+            "`google-cloud-vision`, `pdfplumber`, `pillow`"
+        )
+        ocr_disponible = False
+ 
+    if ocr_disponible:
+        archivo_ocr = st.file_uploader(
+            "Sube la imagen o PDF del documento",
+            type=["jpg", "jpeg", "png", "webp", "pdf"],
+            key="up_ocr"
+        )
+ 
+        if archivo_ocr:
+            if archivo_ocr.type != "application/pdf":
+                st.image(archivo_ocr, caption="Documento cargado", use_container_width=True)
+            else:
+                st.info("📄 PDF cargado correctamente.")
+ 
+            if st.button("🔍 Extraer datos del documento", type="primary", key="btn_ocr"):
+                with st.spinner("Google Cloud Vision está analizando el documento..."):
+                    try:
+                        archivo_ocr.seek(0)
+                        raw_bytes = archivo_ocr.read()
+                        if archivo_ocr.type == "application/pdf":
+                            texto_ocr = extraer_texto_pdf(raw_bytes)
+                            if not texto_ocr:
+                                st.warning(
+                                    "El PDF no tiene texto seleccionable. "
+                                    "Convierte cada página a imagen JPG y súbela por separado.")
+                                st.stop()
+                        else:
+                            texto_ocr = extraer_texto_imagen(raw_bytes)
+                        if not texto_ocr.strip():
+                            st.error("No se pudo extraer texto. Verifica que la imagen sea nítida.")
+                            st.stop()
+                        with st.expander("🔎 Ver texto extraído por OCR", expanded=False):
+                            st.text(texto_ocr)
+                        codigos_validos = df_insumos["Código"].tolist()
+                        datos = parsear_guia_despacho(texto_ocr, codigos_validos)
+                        st.session_state["ocr_resultado"] = datos
+                        if datos["items"]:
+                            st.success(f"✅ Se detectaron **{len(datos['items'])} ítem(s)**.")
+                        else:
+                            st.warning(
+                                "No se detectaron ítems con códigos válidos. "
+                                "Revisa el texto extraído y ajusta manualmente.")
+                    except Exception as e:
+                        st.error(f"Error al procesar el documento: {e}")
 
     # ── Resultados y revisión ─────────────────────────────────────────────────
     if st.session_state.get("ocr_resultado"):

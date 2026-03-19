@@ -1,12 +1,35 @@
 """
 =============================================================
-  LMN 
+  LMN Bicentenario — Sistema de Inventario (Service Account)
 =============================================================
+Persistencia via Google Drive con Service Account.
+No requiere login del usuario.
 
+Archivos necesarios en la misma carpeta:
+  - inventario_sa.py        (este archivo)
+  - gdrive.py               (módulo de Drive)
+  - .streamlit/secrets.toml (credenciales)
+
+secrets.toml:
+  [gdrive]
+  file_id = "1ABC_XYZ_id_del_archivo"
+
+  [gcp_service_account]
+  type = "service_account"
+  project_id = "mi-proyecto"
+  private_key_id = "abc123"
+  private_key = "-----BEGIN RSA PRIVATE KEY-----\\n..."
+  client_email = "inventario-bot@mi-proyecto.iam.gserviceaccount.com"
+  client_id = "123456789"
+  auth_uri = "https://accounts.google.com/o/oauth2/auth"
+  token_uri = "https://oauth2.googleapis.com/token"
 """
 
 import shutil
 import io
+import base64
+import json
+import requests
 import pandas as pd
 import streamlit as st
 import altair as alt
@@ -489,7 +512,7 @@ with st.sidebar:
         st.success("✅ Sin vencimientos críticos (30 días)")
 
 # ── Pestañas ──────────────────────────────────────────────────────────────────
-tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes, tab_alertas, tab_sucursales = st.tabs([
+tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes, tab_alertas, tab_sucursales, tab_ocr = st.tabs([
     "🔍 Consultar Stock",
     "➕ Registrar Ingreso",
     "➖ Registrar Salida",
@@ -497,6 +520,7 @@ tab_consulta, tab_ingreso, tab_salida, tab_carga, tab_reportes, tab_alertas, tab
     "📊 Reportes",
     "⚠️ Alertas",
     "🏢 Sucursales",
+    "📄 Cargar desde documento",
 ])
 
 
@@ -1730,3 +1754,314 @@ with tab_sucursales:
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error al actualizar: {e}")
+
+# ══════════════════════════════════════════════
+# TAB 8 — CARGAR DESDE DOCUMENTO (OCR con Claude Vision)
+# ══════════════════════════════════════════════
+with tab_ocr:
+    st.subheader("📄 Cargar insumos desde documento")
+    st.markdown(
+        "Sube una **foto o PDF** de una guía de despacho, factura o formulario de pedido. "
+        "Claude Vision extraerá automáticamente los insumos, cantidades, lotes y fechas de vencimiento."
+    )
+
+    # ── API Key ────────────────────────────────────────────────────────────────
+    api_key_ocr = st.secrets.get("anthropic", {}).get("api_key", "")
+    if not api_key_ocr:
+        api_key_ocr = st.text_input(
+            "🔑 API Key de Anthropic (si no está en secrets.toml)",
+            type="password",
+            key="ocr_api_key",
+            help="Consíguela en https://console.anthropic.com"
+        ).strip()
+
+    # ── Uploader ──────────────────────────────────────────────────────────────
+    archivo_ocr = st.file_uploader(
+        "Sube la imagen o PDF del documento",
+        type=["jpg", "jpeg", "png", "webp", "pdf"],
+        key="up_ocr"
+    )
+
+    if archivo_ocr and api_key_ocr:
+
+        # Mostrar preview de la imagen
+        if archivo_ocr.type != "application/pdf":
+            st.image(archivo_ocr, caption="Documento cargado", use_container_width=True)
+        else:
+            st.info("📄 PDF cargado correctamente.")
+
+        if st.button("🔍 Extraer datos del documento", type="primary", key="btn_ocr"):
+            with st.spinner("Claude Vision está analizando el documento..."):
+                try:
+                    # Convertir archivo a base64
+                    archivo_ocr.seek(0)
+                    raw_bytes = archivo_ocr.read()
+                    b64_data  = base64.standard_b64encode(raw_bytes).decode("utf-8")
+
+                    # Determinar media_type
+                    tipo_map = {
+                        "image/jpeg": "image/jpeg",
+                        "image/png":  "image/png",
+                        "image/webp": "image/webp",
+                        "application/pdf": "application/pdf",
+                    }
+                    media_type = tipo_map.get(archivo_ocr.type, "image/jpeg")
+
+                    # Construir el bloque de contenido según el tipo
+                    if media_type == "application/pdf":
+                        source_block = {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": b64_data,
+                        }
+                        content_source_type = "document"
+                    else:
+                        source_block = {
+                            "type":       "base64",
+                            "media_type": media_type,
+                            "data":       b64_data,
+                        }
+                        content_source_type = "image"
+
+                    # Catálogo de insumos para ayudar al cruce
+                    catalogo_txt = "\n".join(
+                        f"{r['Código']}: {r['Nombre del insumo']}"
+                        for _, r in df_insumos.iterrows()
+                    )
+
+                    prompt = f"""Analiza este documento (guía de despacho, factura o formulario de pedido de insumos médicos) y extrae todos los productos/insumos que aparecen.
+
+Catálogo de insumos disponibles en el sistema (Código: Nombre):
+{catalogo_txt}
+
+Instrucciones:
+1. Identifica cada ítem con su cantidad, lote y fecha de caducidad si aparecen.
+2. Intenta hacer corresponder cada ítem del documento con el código del catálogo. Si no encuentras coincidencia exacta, usa el código más parecido. Si no hay ninguno relacionado, deja el código vacío.
+3. Las fechas de caducidad conviértelas al formato DD-MM-YYYY.
+4. Si el lote no aparece, deja el campo vacío.
+5. Responde SOLO con un JSON válido, sin texto adicional, sin comillas de markdown, con esta estructura exacta:
+
+{{
+  "items": [
+    {{
+      "codigo": "IS02",
+      "nombre": "AGUJA MÚLTIPLE 21 G",
+      "cantidad": 6,
+      "lote": "250808",
+      "fecha_caducidad": "07-08-2030"
+    }}
+  ],
+  "sucursal_origen": "CESFAM PADRE ORELLANA",
+  "fecha_documento": "19-03-2026",
+  "numero_documento": "3160"
+}}"""
+
+                    # Llamada a la API de Anthropic
+                    payload = {
+                        "model": "claude-opus-4-5",
+                        "max_tokens": 2000,
+                        "messages": [{
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": content_source_type,
+                                    "source": source_block,
+                                },
+                                {
+                                    "type": "text",
+                                    "text": prompt,
+                                }
+                            ]
+                        }]
+                    }
+
+                    resp = requests.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "x-api-key":         api_key_ocr,
+                            "anthropic-version": "2023-06-01",
+                            "content-type":      "application/json",
+                        },
+                        json=payload,
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    resp_data = resp.json()
+
+                    # Extraer texto de la respuesta
+                    texto_resp = ""
+                    for bloque in resp_data.get("content", []):
+                        if bloque.get("type") == "text":
+                            texto_resp += bloque["text"]
+
+                    # Limpiar posibles backticks de markdown
+                    texto_limpio = texto_resp.strip()
+                    if texto_limpio.startswith("```"):
+                        texto_limpio = texto_limpio.split("```")[1]
+                        if texto_limpio.startswith("json"):
+                            texto_limpio = texto_limpio[4:]
+
+                    datos = json.loads(texto_limpio)
+                    st.session_state["ocr_resultado"] = datos
+                    st.success("✅ Documento analizado correctamente.")
+
+                except requests.exceptions.HTTPError as e:
+                    st.error(f"Error de API: {e.response.status_code} — {e.response.text}")
+                except json.JSONDecodeError as e:
+                    st.error(f"Error al interpretar la respuesta de Claude: {e}")
+                    st.code(texto_resp, language="text")
+                except Exception as e:
+                    st.error(f"Error inesperado: {e}")
+
+    elif archivo_ocr and not api_key_ocr:
+        st.warning("⚠️ Ingresa tu API Key de Anthropic para procesar el documento.")
+
+    # ── Resultados y revisión ─────────────────────────────────────────────────
+    if st.session_state.get("ocr_resultado"):
+        datos = st.session_state["ocr_resultado"]
+        items = datos.get("items", [])
+
+        st.divider()
+        st.markdown("### 📋 Datos extraídos — revisa y corrige antes de importar")
+
+        # Metadatos del documento
+        meta1, meta2, meta3 = st.columns(3)
+        meta1.info(f"📍 Origen: **{datos.get('sucursal_origen', 'No detectado')}**")
+        meta2.info(f"📅 Fecha doc: **{datos.get('fecha_documento', 'No detectado')}**")
+        meta3.info(f"🔢 N° doc: **{datos.get('numero_documento', 'No detectado')}**")
+
+        st.divider()
+
+        # Tabla editable para revisar
+        codigos_validos = df_insumos["Código"].tolist()
+        nombre_por_cod  = df_insumos.set_index("Código")["Nombre del insumo"].to_dict()
+
+        filas_editables = []
+        errores_ocr     = []
+
+        for i, item in enumerate(items):
+            cod  = str(item.get("codigo", "")).strip().upper()
+            nom  = item.get("nombre", "")
+            cant = item.get("cantidad", 0)
+            lote = str(item.get("lote", "")).strip() or "N/A"
+            fvenc = str(item.get("fecha_caducidad", "")).strip() or "S/V"
+
+            # Verificar si el código existe en el catálogo
+            valido = cod in codigos_validos
+            if valido:
+                nom = nombre_por_cod.get(cod, nom)
+            else:
+                errores_ocr.append(f"Fila {i+1}: código **{cod}** no encontrado en el catálogo.")
+
+            filas_editables.append({
+                "✓": valido,
+                "Código":            cod,
+                "Nombre del insumo": nom,
+                "Cantidad":          int(cant) if cant else 0,
+                "Lote":              lote,
+                "Fecha caducidad":   fvenc,
+            })
+
+        df_ocr = pd.DataFrame(filas_editables)
+
+        # Mostrar errores si los hay
+        if errores_ocr:
+            with st.expander(f"⚠️ {len(errores_ocr)} ítem(s) con código no reconocido", expanded=True):
+                for e in errores_ocr:
+                    st.caption(f"→ {e}")
+
+        # Tabla editable
+        df_editado = st.data_editor(
+            df_ocr,
+            use_container_width=True,
+            hide_index=True,
+            disabled=["✓"],
+            column_config={
+                "✓":      st.column_config.CheckboxColumn("✓", help="Código válido en catálogo"),
+                "Código": st.column_config.SelectboxColumn(
+                    "Código", options=codigos_validos, required=True),
+                "Cantidad": st.column_config.NumberColumn("Cantidad", min_value=0, step=1),
+            },
+            key="editor_ocr"
+        )
+
+        # Resumen
+        validos_count = int(df_editado["✓"].sum()) if "✓" in df_editado.columns else 0
+        st.info(f"**{validos_count}** ítem(s) válidos de **{len(df_editado)}** extraídos")
+
+        st.divider()
+
+        # Proveedor / observación opcional
+        col_prov_ocr, col_obs_ocr = st.columns(2)
+        with col_prov_ocr:
+            prov_ocr = st.text_input(
+                "Proveedor", key="ocr_prov",
+                value="LMN Bicentenario",
+                placeholder="Ej: LMN Bicentenario"
+            ).strip()
+        with col_obs_ocr:
+            obs_ocr = st.text_input(
+                "Observación", key="ocr_obs",
+                value=f"Importado desde guía N° {datos.get('numero_documento', '')}",
+                placeholder="Ej: Guía de despacho N°3160"
+            ).strip()
+
+        # Botón confirmar importación
+        if st.button(
+            f"📥 Importar {validos_count} ítem(s) al inventario",
+            type="primary", key="btn_importar_ocr",
+            disabled=(validos_count == 0)
+        ):
+            ahora      = now_chile()
+            filas_ok   = []
+            filas_err  = []
+
+            for _, row in df_editado.iterrows():
+                cod  = str(row["Código"]).strip().upper()
+                if cod not in codigos_validos:
+                    filas_err.append(cod); continue
+                cant = float(row["Cantidad"])
+                if cant <= 0:
+                    filas_err.append(f"{cod} (cantidad 0)"); continue
+
+                lote = str(row["Lote"]).strip() or "N/A"
+                fv   = str(row["Fecha caducidad"]).strip()
+
+                # Convertir fecha de caducidad
+                try:
+                    from datetime import datetime as _dt
+                    venc_dt = _dt.strptime(fv, "%d-%m-%Y") if fv not in ("S/V", "", "nan") else "S/V"
+                except Exception:
+                    venc_dt = "S/V"
+
+                filas_ok.append({
+                    "Fecha":              ahora,
+                    "Código":             cod,
+                    "Nombre del insumo":  nombre_por_cod.get(cod, row["Nombre del insumo"]),
+                    "Lote":               lote,
+                    "Cantidad":           cant,
+                    "Fecha de caducidad": venc_dt,
+                    "Proveedor":          prov_ocr,
+                    "Observación":        obs_ocr,
+                })
+
+            if not filas_ok:
+                st.error("No hay filas válidas para importar.")
+            else:
+                ok, msg = guardar_y_reportes(
+                    pd.concat([df_ing, pd.DataFrame(filas_ok)], ignore_index=True),
+                    "Ingresos"
+                )
+                if ok:
+                    st.session_state["ocr_resultado"] = None
+                    st.success(f"✅ {len(filas_ok)} insumos importados correctamente.")
+                    if filas_err:
+                        st.warning(f"Se omitieron: {', '.join(filas_err)}")
+                    st.rerun()
+                else:
+                    st.error(msg)
+
+        # Botón limpiar
+        if st.button("🗑️ Limpiar resultado", key="btn_limpiar_ocr"):
+            st.session_state["ocr_resultado"] = None
+            st.rerun()

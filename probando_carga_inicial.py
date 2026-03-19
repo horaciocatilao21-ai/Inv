@@ -1109,150 +1109,6 @@ with tab_salida:
             )
 
 
-    # ── Gráficos de movimiento ────────────────────────────────────────────────
-    with r6:
-        st.markdown("#### 📈 Gráficos de movimiento")
-
-        if df_ing.empty and df_sal.empty:
-            st.info("No hay datos suficientes para generar gráficos.")
-        else:
-            # ── Selector de agrupación temporal ──────────────────────────────
-            col_agr, col_top = st.columns([2, 2])
-            with col_agr:
-                agrupacion = st.radio(
-                    "Agrupar por",
-                    ["Día", "Semana", "Mes"],
-                    horizontal=True,
-                    key="graf_agrupacion"
-                )
-            freq_map = {"Día": "D", "Semana": "W", "Mes": "ME"}
-            freq     = freq_map[agrupacion]
-            fmt_map  = {"Día": "%d-%m-%Y", "Semana": "%d-%m-%Y", "Mes": "%m-%Y"}
-            fmt_lbl  = fmt_map[agrupacion]
-
-            # ── Preparar series temporales ────────────────────────────────────
-            def _serie_temporal(df, col_fecha, col_cant, freq, fmt):
-                if df.empty or col_fecha not in df.columns:
-                    return pd.DataFrame(columns=["Período", "Cantidad"])
-                df2 = df.copy()
-                df2[col_fecha] = pd.to_datetime(df2[col_fecha], errors="coerce")
-                df2 = df2.dropna(subset=[col_fecha])
-                df2 = df2.set_index(col_fecha)
-                serie = df2[col_cant].resample(freq).sum().reset_index()
-                serie.columns = ["Período", "Cantidad"]
-                serie["Período_str"] = serie["Período"].dt.strftime(fmt)
-                return serie
-
-            s_ing = _serie_temporal(df_ing, "Fecha", "Cantidad", freq, fmt_lbl)
-            s_sal = _serie_temporal(df_sal, "Fecha", "Cantidad", freq, fmt_lbl)
-
-            # ── GRÁFICO 1: Ingresos vs Salidas en el tiempo ───────────────────
-            st.divider()
-            st.markdown("##### Ingresos vs Salidas en el tiempo")
-
-            if not s_ing.empty or not s_sal.empty:
-                s_ing2 = s_ing.copy(); s_ing2["Tipo"] = "Ingresos"
-                s_sal2 = s_sal.copy(); s_sal2["Tipo"] = "Salidas"
-                df_evol = pd.concat([s_ing2, s_sal2], ignore_index=True)
-                df_evol = df_evol.rename(columns={"Período_str": "Período label"})
-
-                chart1 = alt.Chart(df_evol).mark_bar().encode(
-                    x=alt.X("Período label:N", title="Período",
-                            sort=df_evol["Período label"].tolist()),
-                    y=alt.Y("Cantidad:Q", title="Unidades"),
-                    color=alt.Color("Tipo:N",
-                        scale=alt.Scale(
-                            domain=["Ingresos", "Salidas"],
-                            range=["#2ecc71", "#e74c3c"]
-                        ),
-                        legend=alt.Legend(orient="top")
-                    ),
-                    xOffset="Tipo:N",
-                    tooltip=["Período label:N", "Tipo:N", "Cantidad:Q"]
-                ).properties(height=350)
-                st.altair_chart(chart1, use_container_width=True)
-            else:
-                st.info("Sin datos para este gráfico.")
-
-            # ── GRÁFICO 2 y 3: Top insumos ────────────────────────────────────
-            st.divider()
-            with col_top:
-                top_n = st.slider("Top insumos a mostrar", 5, 20, 10, key="graf_top_n")
-
-            col_g2, col_g3 = st.columns(2)
-
-            with col_g2:
-                st.markdown("##### Top insumos más ingresados")
-                if not df_ing.empty and "Nombre del insumo" in df_ing.columns:
-                    top_ing = (
-                        df_ing.groupby("Nombre del insumo")["Cantidad"]
-                        .sum().nlargest(top_n).reset_index()
-                        .rename(columns={"Cantidad": "Total"})
-                    )
-                    top_ing["Nombre corto"] = top_ing["Nombre del insumo"].str[:28]
-                    chart2 = alt.Chart(top_ing).mark_bar(color="#2ecc71").encode(
-                        x=alt.X("Total:Q", title="Unidades"),
-                        y=alt.Y("Nombre corto:N", sort="-x", title=""),
-                        tooltip=["Nombre del insumo:N", "Total:Q"]
-                    ).properties(height=max(200, top_n * 28))
-                    st.altair_chart(chart2, use_container_width=True)
-                else:
-                    st.info("Sin datos de ingresos.")
-
-            with col_g3:
-                st.markdown("##### Top insumos más despachados")
-                if not df_sal.empty and "Nombre del insumo" in df_sal.columns:
-                    top_sal = (
-                        df_sal.groupby("Nombre del insumo")["Cantidad"]
-                        .sum().nlargest(top_n).reset_index()
-                        .rename(columns={"Cantidad": "Total"})
-                    )
-                    top_sal["Nombre corto"] = top_sal["Nombre del insumo"].str[:28]
-                    chart3 = alt.Chart(top_sal).mark_bar(color="#e74c3c").encode(
-                        x=alt.X("Total:Q", title="Unidades"),
-                        y=alt.Y("Nombre corto:N", sort="-x", title=""),
-                        tooltip=["Nombre del insumo:N", "Total:Q"]
-                    ).properties(height=max(200, top_n * 28))
-                    st.altair_chart(chart3, use_container_width=True)
-                else:
-                    st.info("Sin datos de salidas.")
-
-            # ── GRÁFICO 4: Despachos por sucursal ────────────────────────────
-            st.divider()
-            st.markdown("##### Despachos por sucursal")
-            if not df_sal.empty and "Destino" in df_sal.columns:
-                dist_suc = (
-                    df_sal.groupby("Destino")["Cantidad"]
-                    .sum().reset_index()
-                    .rename(columns={"Cantidad": "Unidades"})
-                    .sort_values("Unidades", ascending=False)
-                )
-                col_arc, col_bar_suc = st.columns(2)
-                with col_arc:
-                    # Donut con altair
-                    dist_suc["porcentaje"] = (
-                        dist_suc["Unidades"] / dist_suc["Unidades"].sum() * 100
-                    ).round(1).astype(str) + "%"
-                    chart4 = alt.Chart(dist_suc).mark_arc(innerRadius=60).encode(
-                        theta=alt.Theta("Unidades:Q"),
-                        color=alt.Color("Destino:N",
-                            legend=alt.Legend(orient="bottom")),
-                        tooltip=["Destino:N", "Unidades:Q", "porcentaje:N"]
-                    ).properties(height=280)
-                    st.altair_chart(chart4, use_container_width=True)
-                with col_bar_suc:
-                    chart5 = alt.Chart(dist_suc).mark_bar().encode(
-                        x=alt.X("Destino:N", title="Sucursal", sort="-y"),
-                        y=alt.Y("Unidades:Q", title="Unidades despachadas"),
-                        color=alt.Color("Destino:N", legend=None),
-                        tooltip=["Destino:N", "Unidades:Q"]
-                    ).properties(height=280)
-                    st.altair_chart(chart5, use_container_width=True)
-            else:
-                st.info("Sin datos de salidas por sucursal.")
-
-
-# ══════════════════════════════════════════════
 # TAB 4 — CARGA INICIAL
 # ══════════════════════════════════════════════
 with tab_carga:
@@ -1524,6 +1380,150 @@ with tab_reportes:
                 key="dl_rep_sal",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
+# ══════════════════════════════════════════════
+    # ── Gráficos de movimiento ────────────────────────────────────────────────
+    with r6:
+        st.markdown("#### 📈 Gráficos de movimiento")
+
+        if df_ing.empty and df_sal.empty:
+            st.info("No hay datos suficientes para generar gráficos.")
+        else:
+            # ── Selector de agrupación temporal ──────────────────────────────
+            col_agr, col_top = st.columns([2, 2])
+            with col_agr:
+                agrupacion = st.radio(
+                    "Agrupar por",
+                    ["Día", "Semana", "Mes"],
+                    horizontal=True,
+                    key="graf_agrupacion"
+                )
+            freq_map = {"Día": "D", "Semana": "W", "Mes": "ME"}
+            freq     = freq_map[agrupacion]
+            fmt_map  = {"Día": "%d-%m-%Y", "Semana": "%d-%m-%Y", "Mes": "%m-%Y"}
+            fmt_lbl  = fmt_map[agrupacion]
+
+            # ── Preparar series temporales ────────────────────────────────────
+            def _serie_temporal(df, col_fecha, col_cant, freq, fmt):
+                if df.empty or col_fecha not in df.columns:
+                    return pd.DataFrame(columns=["Período", "Cantidad"])
+                df2 = df.copy()
+                df2[col_fecha] = pd.to_datetime(df2[col_fecha], errors="coerce")
+                df2 = df2.dropna(subset=[col_fecha])
+                df2 = df2.set_index(col_fecha)
+                serie = df2[col_cant].resample(freq).sum().reset_index()
+                serie.columns = ["Período", "Cantidad"]
+                serie["Período_str"] = serie["Período"].dt.strftime(fmt)
+                return serie
+
+            s_ing = _serie_temporal(df_ing, "Fecha", "Cantidad", freq, fmt_lbl)
+            s_sal = _serie_temporal(df_sal, "Fecha", "Cantidad", freq, fmt_lbl)
+
+            # ── GRÁFICO 1: Ingresos vs Salidas en el tiempo ───────────────────
+            st.divider()
+            st.markdown("##### Ingresos vs Salidas en el tiempo")
+
+            if not s_ing.empty or not s_sal.empty:
+                s_ing2 = s_ing.copy(); s_ing2["Tipo"] = "Ingresos"
+                s_sal2 = s_sal.copy(); s_sal2["Tipo"] = "Salidas"
+                df_evol = pd.concat([s_ing2, s_sal2], ignore_index=True)
+                df_evol = df_evol.rename(columns={"Período_str": "Período label"})
+
+                chart1 = alt.Chart(df_evol).mark_bar().encode(
+                    x=alt.X("Período label:N", title="Período",
+                            sort=df_evol["Período label"].tolist()),
+                    y=alt.Y("Cantidad:Q", title="Unidades"),
+                    color=alt.Color("Tipo:N",
+                        scale=alt.Scale(
+                            domain=["Ingresos", "Salidas"],
+                            range=["#2ecc71", "#e74c3c"]
+                        ),
+                        legend=alt.Legend(orient="top")
+                    ),
+                    xOffset="Tipo:N",
+                    tooltip=["Período label:N", "Tipo:N", "Cantidad:Q"]
+                ).properties(height=350)
+                st.altair_chart(chart1, use_container_width=True)
+            else:
+                st.info("Sin datos para este gráfico.")
+
+            # ── GRÁFICO 2 y 3: Top insumos ────────────────────────────────────
+            st.divider()
+            with col_top:
+                top_n = st.slider("Top insumos a mostrar", 5, 20, 10, key="graf_top_n")
+
+            col_g2, col_g3 = st.columns(2)
+
+            with col_g2:
+                st.markdown("##### Top insumos más ingresados")
+                if not df_ing.empty and "Nombre del insumo" in df_ing.columns:
+                    top_ing = (
+                        df_ing.groupby("Nombre del insumo")["Cantidad"]
+                        .sum().nlargest(top_n).reset_index()
+                        .rename(columns={"Cantidad": "Total"})
+                    )
+                    top_ing["Nombre corto"] = top_ing["Nombre del insumo"].str[:28]
+                    chart2 = alt.Chart(top_ing).mark_bar(color="#2ecc71").encode(
+                        x=alt.X("Total:Q", title="Unidades"),
+                        y=alt.Y("Nombre corto:N", sort="-x", title=""),
+                        tooltip=["Nombre del insumo:N", "Total:Q"]
+                    ).properties(height=max(200, top_n * 28))
+                    st.altair_chart(chart2, use_container_width=True)
+                else:
+                    st.info("Sin datos de ingresos.")
+
+            with col_g3:
+                st.markdown("##### Top insumos más despachados")
+                if not df_sal.empty and "Nombre del insumo" in df_sal.columns:
+                    top_sal = (
+                        df_sal.groupby("Nombre del insumo")["Cantidad"]
+                        .sum().nlargest(top_n).reset_index()
+                        .rename(columns={"Cantidad": "Total"})
+                    )
+                    top_sal["Nombre corto"] = top_sal["Nombre del insumo"].str[:28]
+                    chart3 = alt.Chart(top_sal).mark_bar(color="#e74c3c").encode(
+                        x=alt.X("Total:Q", title="Unidades"),
+                        y=alt.Y("Nombre corto:N", sort="-x", title=""),
+                        tooltip=["Nombre del insumo:N", "Total:Q"]
+                    ).properties(height=max(200, top_n * 28))
+                    st.altair_chart(chart3, use_container_width=True)
+                else:
+                    st.info("Sin datos de salidas.")
+
+            # ── GRÁFICO 4: Despachos por sucursal ────────────────────────────
+            st.divider()
+            st.markdown("##### Despachos por sucursal")
+            if not df_sal.empty and "Destino" in df_sal.columns:
+                dist_suc = (
+                    df_sal.groupby("Destino")["Cantidad"]
+                    .sum().reset_index()
+                    .rename(columns={"Cantidad": "Unidades"})
+                    .sort_values("Unidades", ascending=False)
+                )
+                col_arc, col_bar_suc = st.columns(2)
+                with col_arc:
+                    # Donut con altair
+                    dist_suc["porcentaje"] = (
+                        dist_suc["Unidades"] / dist_suc["Unidades"].sum() * 100
+                    ).round(1).astype(str) + "%"
+                    chart4 = alt.Chart(dist_suc).mark_arc(innerRadius=60).encode(
+                        theta=alt.Theta("Unidades:Q"),
+                        color=alt.Color("Destino:N",
+                            legend=alt.Legend(orient="bottom")),
+                        tooltip=["Destino:N", "Unidades:Q", "porcentaje:N"]
+                    ).properties(height=280)
+                    st.altair_chart(chart4, use_container_width=True)
+                with col_bar_suc:
+                    chart5 = alt.Chart(dist_suc).mark_bar().encode(
+                        x=alt.X("Destino:N", title="Sucursal", sort="-y"),
+                        y=alt.Y("Unidades:Q", title="Unidades despachadas"),
+                        color=alt.Color("Destino:N", legend=None),
+                        tooltip=["Destino:N", "Unidades:Q"]
+                    ).properties(height=280)
+                    st.altair_chart(chart5, use_container_width=True)
+            else:
+                st.info("Sin datos de salidas por sucursal.")
+
 
 # ══════════════════════════════════════════════
 # TAB 7 — GESTIÓN DE SUCURSALES

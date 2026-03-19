@@ -29,8 +29,7 @@ import shutil
 import io
 import pandas as pd
 import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
+import altair as alt
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -1141,7 +1140,7 @@ with tab_salida:
                 df2 = df2.set_index(col_fecha)
                 serie = df2[col_cant].resample(freq).sum().reset_index()
                 serie.columns = ["Período", "Cantidad"]
-                serie["Período"] = serie["Período"].dt.strftime(fmt)
+                serie["Período_str"] = serie["Período"].dt.strftime(fmt)
                 return serie
 
             s_ing = _serie_temporal(df_ing, "Fecha", "Cantidad", freq, fmt_lbl)
@@ -1152,40 +1151,30 @@ with tab_salida:
             st.markdown("##### Ingresos vs Salidas en el tiempo")
 
             if not s_ing.empty or not s_sal.empty:
-                # Unir ambas series por período
-                df_evol = pd.merge(
-                    s_ing.rename(columns={"Cantidad": "Ingresos"}),
-                    s_sal.rename(columns={"Cantidad": "Salidas"}),
-                    on="Período", how="outer"
-                ).fillna(0).sort_values("Período")
+                s_ing2 = s_ing.copy(); s_ing2["Tipo"] = "Ingresos"
+                s_sal2 = s_sal.copy(); s_sal2["Tipo"] = "Salidas"
+                df_evol = pd.concat([s_ing2, s_sal2], ignore_index=True)
+                df_evol = df_evol.rename(columns={"Período_str": "Período label"})
 
-                fig1 = go.Figure()
-                fig1.add_trace(go.Bar(
-                    x=df_evol["Período"], y=df_evol["Ingresos"],
-                    name="📥 Ingresos", marker_color="#2ecc71"
-                ))
-                fig1.add_trace(go.Bar(
-                    x=df_evol["Período"], y=df_evol["Salidas"],
-                    name="📤 Salidas", marker_color="#e74c3c"
-                ))
-                fig1.update_layout(
-                    barmode="group",
-                    xaxis_title="Período",
-                    yaxis_title="Unidades",
-                    legend=dict(orientation="h", y=1.1),
-                    height=380,
-                    margin=dict(t=30, b=30),
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    font=dict(color="#ffffff"),
-                )
-                fig1.update_xaxes(showgrid=False)
-                fig1.update_yaxes(gridcolor="rgba(255,255,255,0.1)")
-                st.plotly_chart(fig1, use_container_width=True)
+                chart1 = alt.Chart(df_evol).mark_bar().encode(
+                    x=alt.X("Período label:N", title="Período",
+                            sort=df_evol["Período label"].tolist()),
+                    y=alt.Y("Cantidad:Q", title="Unidades"),
+                    color=alt.Color("Tipo:N",
+                        scale=alt.Scale(
+                            domain=["Ingresos", "Salidas"],
+                            range=["#2ecc71", "#e74c3c"]
+                        ),
+                        legend=alt.Legend(orient="top")
+                    ),
+                    xOffset="Tipo:N",
+                    tooltip=["Período label:N", "Tipo:N", "Cantidad:Q"]
+                ).properties(height=350)
+                st.altair_chart(chart1, use_container_width=True)
             else:
                 st.info("Sin datos para este gráfico.")
 
-            # ── GRÁFICO 2: Top insumos más ingresados ─────────────────────────
+            # ── GRÁFICO 2 y 3: Top insumos ────────────────────────────────────
             st.divider()
             with col_top:
                 top_n = st.slider("Top insumos a mostrar", 5, 20, 10, key="graf_top_n")
@@ -1198,106 +1187,67 @@ with tab_salida:
                     top_ing = (
                         df_ing.groupby("Nombre del insumo")["Cantidad"]
                         .sum().nlargest(top_n).reset_index()
-                        .rename(columns={"Cantidad": "Total ingresado"})
+                        .rename(columns={"Cantidad": "Total"})
                     )
-                    top_ing["Nombre corto"] = top_ing["Nombre del insumo"].str[:25]
-                    fig2 = px.bar(
-                        top_ing, x="Total ingresado", y="Nombre corto",
-                        orientation="h", color="Total ingresado",
-                        color_continuous_scale="Greens",
-                        labels={"Total ingresado": "Unidades", "Nombre corto": ""},
-                    )
-                    fig2.update_layout(
-                        height=380, showlegend=False,
-                        coloraxis_showscale=False,
-                        margin=dict(t=10, b=10, l=10),
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        font=dict(color="#ffffff"),
-                        yaxis=dict(autorange="reversed"),
-                    )
-                    fig2.update_xaxes(showgrid=False)
-                    fig2.update_yaxes(showgrid=False)
-                    st.plotly_chart(fig2, use_container_width=True)
+                    top_ing["Nombre corto"] = top_ing["Nombre del insumo"].str[:28]
+                    chart2 = alt.Chart(top_ing).mark_bar(color="#2ecc71").encode(
+                        x=alt.X("Total:Q", title="Unidades"),
+                        y=alt.Y("Nombre corto:N", sort="-x", title=""),
+                        tooltip=["Nombre del insumo:N", "Total:Q"]
+                    ).properties(height=max(200, top_n * 28))
+                    st.altair_chart(chart2, use_container_width=True)
                 else:
                     st.info("Sin datos de ingresos.")
 
-            # ── GRÁFICO 3: Top insumos más despachados ────────────────────────
             with col_g3:
                 st.markdown("##### Top insumos más despachados")
                 if not df_sal.empty and "Nombre del insumo" in df_sal.columns:
                     top_sal = (
                         df_sal.groupby("Nombre del insumo")["Cantidad"]
                         .sum().nlargest(top_n).reset_index()
-                        .rename(columns={"Cantidad": "Total despachado"})
+                        .rename(columns={"Cantidad": "Total"})
                     )
-                    top_sal["Nombre corto"] = top_sal["Nombre del insumo"].str[:25]
-                    fig3 = px.bar(
-                        top_sal, x="Total despachado", y="Nombre corto",
-                        orientation="h", color="Total despachado",
-                        color_continuous_scale="Reds",
-                        labels={"Total despachado": "Unidades", "Nombre corto": ""},
-                    )
-                    fig3.update_layout(
-                        height=380, showlegend=False,
-                        coloraxis_showscale=False,
-                        margin=dict(t=10, b=10, l=10),
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        font=dict(color="#ffffff"),
-                        yaxis=dict(autorange="reversed"),
-                    )
-                    fig3.update_xaxes(showgrid=False)
-                    fig3.update_yaxes(showgrid=False)
-                    st.plotly_chart(fig3, use_container_width=True)
+                    top_sal["Nombre corto"] = top_sal["Nombre del insumo"].str[:28]
+                    chart3 = alt.Chart(top_sal).mark_bar(color="#e74c3c").encode(
+                        x=alt.X("Total:Q", title="Unidades"),
+                        y=alt.Y("Nombre corto:N", sort="-x", title=""),
+                        tooltip=["Nombre del insumo:N", "Total:Q"]
+                    ).properties(height=max(200, top_n * 28))
+                    st.altair_chart(chart3, use_container_width=True)
                 else:
                     st.info("Sin datos de salidas.")
 
-            # ── GRÁFICO 4: Distribución de salidas por sucursal ───────────────
+            # ── GRÁFICO 4: Despachos por sucursal ────────────────────────────
             st.divider()
-            st.markdown("##### Distribución de despachos por sucursal")
+            st.markdown("##### Despachos por sucursal")
             if not df_sal.empty and "Destino" in df_sal.columns:
                 dist_suc = (
                     df_sal.groupby("Destino")["Cantidad"]
                     .sum().reset_index()
-                    .rename(columns={"Cantidad": "Unidades despachadas"})
-                    .sort_values("Unidades despachadas", ascending=False)
+                    .rename(columns={"Cantidad": "Unidades"})
+                    .sort_values("Unidades", ascending=False)
                 )
-                col_pie, col_bar_suc = st.columns(2)
-                with col_pie:
-                    fig4 = px.pie(
-                        dist_suc, values="Unidades despachadas", names="Destino",
-                        hole=0.45,
-                        color_discrete_sequence=px.colors.qualitative.Set3,
-                    )
-                    fig4.update_layout(
-                        height=350,
-                        margin=dict(t=20, b=20),
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        font=dict(color="#ffffff"),
-                        legend=dict(orientation="v"),
-                    )
-                    fig4.update_traces(textposition="inside", textinfo="percent+label")
-                    st.plotly_chart(fig4, use_container_width=True)
+                col_arc, col_bar_suc = st.columns(2)
+                with col_arc:
+                    # Donut con altair
+                    dist_suc["porcentaje"] = (
+                        dist_suc["Unidades"] / dist_suc["Unidades"].sum() * 100
+                    ).round(1).astype(str) + "%"
+                    chart4 = alt.Chart(dist_suc).mark_arc(innerRadius=60).encode(
+                        theta=alt.Theta("Unidades:Q"),
+                        color=alt.Color("Destino:N",
+                            legend=alt.Legend(orient="bottom")),
+                        tooltip=["Destino:N", "Unidades:Q", "porcentaje:N"]
+                    ).properties(height=280)
+                    st.altair_chart(chart4, use_container_width=True)
                 with col_bar_suc:
-                    fig5 = px.bar(
-                        dist_suc, x="Destino", y="Unidades despachadas",
-                        color="Unidades despachadas",
-                        color_continuous_scale="Blues",
-                        labels={"Unidades despachadas": "Unidades"},
-                    )
-                    fig5.update_layout(
-                        height=350, showlegend=False,
-                        coloraxis_showscale=False,
-                        margin=dict(t=10, b=10),
-                        plot_bgcolor="rgba(0,0,0,0)",
-                        paper_bgcolor="rgba(0,0,0,0)",
-                        font=dict(color="#ffffff"),
-                    )
-                    fig5.update_xaxes(showgrid=False)
-                    fig5.update_yaxes(gridcolor="rgba(255,255,255,0.1)")
-                    st.plotly_chart(fig5, use_container_width=True)
+                    chart5 = alt.Chart(dist_suc).mark_bar().encode(
+                        x=alt.X("Destino:N", title="Sucursal", sort="-y"),
+                        y=alt.Y("Unidades:Q", title="Unidades despachadas"),
+                        color=alt.Color("Destino:N", legend=None),
+                        tooltip=["Destino:N", "Unidades:Q"]
+                    ).properties(height=280)
+                    st.altair_chart(chart5, use_container_width=True)
             else:
                 st.info("Sin datos de salidas por sucursal.")
 

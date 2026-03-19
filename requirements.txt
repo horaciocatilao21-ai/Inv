@@ -3,3 +3,4 @@ pandas
 openpyxl
 google-api-python-client
 google-auth
+requests

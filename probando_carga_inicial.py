@@ -36,8 +36,8 @@ from zoneinfo import ZoneInfo
 TZ_CHILE = ZoneInfo("America/Santiago")
 
 def now_chile() -> datetime:
-    """Retorna la fecha/hora actual en zona horaria de Chile."""
-    return datetime.now(TZ_CHILE)
+    """Retorna la fecha/hora actual en zona horaria de Chile, sin tzinfo para compatibilidad con Excel."""
+    return datetime.now(TZ_CHILE).replace(tzinfo=None)
 from pathlib import Path
 from gdrive import descargar_excel, subir_excel
 

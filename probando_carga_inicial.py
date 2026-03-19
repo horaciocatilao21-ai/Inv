@@ -1,28 +1,8 @@
 """
 =============================================================
-  LMN Bicentenario — Sistema de Inventario (Service Account)
+  LMN 
 =============================================================
-Persistencia via Google Drive con Service Account.
-No requiere login del usuario.
 
-Archivos necesarios en la misma carpeta:
-  - inventario_sa.py        (este archivo)
-  - gdrive.py               (módulo de Drive)
-  - .streamlit/secrets.toml (credenciales)
-
-secrets.toml:
-  [gdrive]
-  file_id = "1ABC_XYZ_id_del_archivo"
-
-  [gcp_service_account]
-  type = "service_account"
-  project_id = "mi-proyecto"
-  private_key_id = "abc123"
-  private_key = "-----BEGIN RSA PRIVATE KEY-----\\n..."
-  client_email = "inventario-bot@mi-proyecto.iam.gserviceaccount.com"
-  client_id = "123456789"
-  auth_uri = "https://accounts.google.com/o/oauth2/auth"
-  token_uri = "https://oauth2.googleapis.com/token"
 """
 
 import shutil
@@ -574,7 +554,13 @@ render_dashboard(df_ing, df_sal, df_insumos, servicio, lista_suc)
 # ══════════════════════════════════════════════
 with tab_consulta:
     st.subheader("Consulta de stock disponible")
-    termino = st.text_input("Buscar por código o nombre del insumo").strip().upper()
+
+    # ── Barra buscadora ───────────────────────────────────────────────────────
+    termino = st.text_input(
+        "🔍 Buscar por código o nombre del insumo",
+        placeholder="Ej: IS01 o Agua destilada..."
+    ).strip().upper()
+
     if termino:
         mask = (
             (df_insumos["Código"] == termino) |
@@ -602,6 +588,94 @@ with tab_consulta:
                 with col2: st.metric("Total disponible", int(lotes["Disponible"].sum()))
                 st.dataframe(ld[["Lote", "Fecha de caducidad", "Disponible"]],
                              use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Tabla desplegable con todos los insumos y su stock ───────────────────
+    with st.expander("📋 Ver stock de todos los insumos", expanded=True):
+
+        # Construir tabla consolidada de stock por insumo
+        df_stock_lote = servicio.construir_stock_por_lote(df_ing, df_sal)             if not df_ing.empty else pd.DataFrame()
+
+        if df_stock_lote.empty:
+            # Sin movimientos aún — mostrar todos los insumos con stock 0
+            df_todos = df_insumos[["Código", "Nombre del insumo"]].copy()
+            df_todos["Stock total"] = 0
+            df_todos["Lotes activos"] = 0
+        else:
+            # Agrupar por insumo: stock total y cantidad de lotes activos
+            resumen_stock = (
+                df_stock_lote[df_stock_lote["Stock disponible"] > 0]
+                .groupby(["Código", "Nombre del insumo"])
+                .agg(
+                    **{"Stock total":   ("Stock disponible", "sum"),
+                       "Lotes activos": ("Lote",            "count")}
+                )
+                .reset_index()
+            )
+            # Unir con catálogo completo para mostrar también los que tienen stock 0
+            df_todos = df_insumos[["Código", "Nombre del insumo"]].merge(
+                resumen_stock, on=["Código", "Nombre del insumo"], how="left"
+            ).fillna({"Stock total": 0, "Lotes activos": 0})
+            df_todos["Stock total"]   = df_todos["Stock total"].astype(int)
+            df_todos["Lotes activos"] = df_todos["Lotes activos"].astype(int)
+
+        # Filtro rápido dentro de la tabla
+        col_f1, col_f2 = st.columns([3, 1])
+        with col_f1:
+            filtro_tabla = st.text_input(
+                "Filtrar tabla", key="filtro_tabla_stock",
+                placeholder="Escribe para filtrar..."
+            ).strip().upper()
+        with col_f2:
+            solo_con_stock = st.checkbox("Solo con stock disponible", value=False,
+                                         key="chk_solo_stock")
+
+        df_mostrar = df_todos.copy()
+        if filtro_tabla:
+            df_mostrar = df_mostrar[
+                df_mostrar["Código"].str.upper().str.contains(filtro_tabla, na=False) |
+                df_mostrar["Nombre del insumo"].str.upper().str.contains(filtro_tabla, na=False)
+            ]
+        if solo_con_stock:
+            df_mostrar = df_mostrar[df_mostrar["Stock total"] > 0]
+
+        df_mostrar = df_mostrar.reset_index(drop=True)
+
+        # Colorear filas según stock
+        def _color_stock(row):
+            if row["Stock total"] == 0:
+                return ["background-color: #3a1a1a"] * len(row)
+            if row["Stock total"] < 50:
+                return ["background-color: #3a2a00"] * len(row)
+            return [""] * len(row)
+
+        # Métricas rápidas
+        mc1, mc2, mc3 = st.columns(3)
+        mc1.metric("Total insumos",       len(df_mostrar))
+        mc2.metric("Con stock disponible", int((df_mostrar["Stock total"] > 0).sum()))
+        mc3.metric("Sin stock",            int((df_mostrar["Stock total"] == 0).sum()))
+
+        st.dataframe(
+            df_mostrar.style.apply(_color_stock, axis=1),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Stock total":   st.column_config.NumberColumn("Stock total",   format="%d"),
+                "Lotes activos": st.column_config.NumberColumn("Lotes activos", format="%d"),
+            }
+        )
+
+        # Descarga
+        buf_stock_all = io.BytesIO()
+        df_mostrar.to_excel(buf_stock_all, index=False)
+        st.download_button(
+            "⬇️ Descargar tabla",
+            buf_stock_all.getvalue(),
+            "stock_todos_insumos.xlsx",
+            key="dl_stock_all",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 
 # ══════════════════════════════════════════════

@@ -29,6 +29,8 @@ import shutil
 import io
 import pandas as pd
 import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -448,6 +450,53 @@ with st.sidebar:
         file_name="inventario_copia_local.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+    st.divider()
+
+    # ── Buscador global ────────────────────────────────────────────────────────
+    st.markdown("#### 🔎 Búsqueda rápida")
+    busqueda_global = st.text_input(
+        "Código o nombre del insumo",
+        key="sidebar_busqueda",
+        placeholder="Ej: IS01 o Agua...",
+        label_visibility="collapsed"
+    ).strip().upper()
+
+    if busqueda_global:
+        mask_g = (
+            (df_insumos["Código"].str.upper() == busqueda_global) |
+            (df_insumos["Nombre del insumo"].str.upper().str.contains(busqueda_global, na=False))
+        )
+        coincidencias_g = df_insumos[mask_g]
+
+        if coincidencias_g.empty:
+            st.warning("Sin resultados.")
+        else:
+            for _, row_g in coincidencias_g.iterrows():
+                cod_g = row_g["Código"]
+                nom_g = row_g["Nombre del insumo"]
+                lotes_g = servicio.stock_por_lote(cod_g, df_ing, df_sal)
+                total_g = int(lotes_g["Disponible"].sum()) if not lotes_g.empty else 0
+
+                with st.container(border=True):
+                    st.markdown(f"**{nom_g}**")
+                    st.caption(f"`{cod_g}`")
+
+                    if total_g == 0:
+                        st.error("Sin stock disponible")
+                    else:
+                        st.success(f"**{total_g}** unidades disponibles")
+
+                        # Detalle por lote
+                        lotes_g_view = lotes_g.copy()
+                        lotes_g_view["Fecha de caducidad"] = lotes_g_view["Fecha de caducidad"].apply(
+                            lambda x: x.strftime("%d-%m-%Y") if hasattr(x, "strftime") else str(x))
+                        for _, lr in lotes_g_view.iterrows():
+                            st.caption(
+                                f"Lote {lr['Lote']} · "
+                                f"Vence {lr['Fecha de caducidad']} · "
+                                f"**{int(lr['Disponible'])} uds**"
+                            )
+
     st.divider()
     # Badge de alertas rápidas en sidebar
     _df_alerta_sb = servicio.vencimientos_proximos(df_ing, df_sal, dias=30)
@@ -1061,6 +1110,198 @@ with tab_salida:
             )
 
 
+    # ── Gráficos de movimiento ────────────────────────────────────────────────
+    with r6:
+        st.markdown("#### 📈 Gráficos de movimiento")
+
+        if df_ing.empty and df_sal.empty:
+            st.info("No hay datos suficientes para generar gráficos.")
+        else:
+            # ── Selector de agrupación temporal ──────────────────────────────
+            col_agr, col_top = st.columns([2, 2])
+            with col_agr:
+                agrupacion = st.radio(
+                    "Agrupar por",
+                    ["Día", "Semana", "Mes"],
+                    horizontal=True,
+                    key="graf_agrupacion"
+                )
+            freq_map = {"Día": "D", "Semana": "W", "Mes": "ME"}
+            freq     = freq_map[agrupacion]
+            fmt_map  = {"Día": "%d-%m-%Y", "Semana": "%d-%m-%Y", "Mes": "%m-%Y"}
+            fmt_lbl  = fmt_map[agrupacion]
+
+            # ── Preparar series temporales ────────────────────────────────────
+            def _serie_temporal(df, col_fecha, col_cant, freq, fmt):
+                if df.empty or col_fecha not in df.columns:
+                    return pd.DataFrame(columns=["Período", "Cantidad"])
+                df2 = df.copy()
+                df2[col_fecha] = pd.to_datetime(df2[col_fecha], errors="coerce")
+                df2 = df2.dropna(subset=[col_fecha])
+                df2 = df2.set_index(col_fecha)
+                serie = df2[col_cant].resample(freq).sum().reset_index()
+                serie.columns = ["Período", "Cantidad"]
+                serie["Período"] = serie["Período"].dt.strftime(fmt)
+                return serie
+
+            s_ing = _serie_temporal(df_ing, "Fecha", "Cantidad", freq, fmt_lbl)
+            s_sal = _serie_temporal(df_sal, "Fecha", "Cantidad", freq, fmt_lbl)
+
+            # ── GRÁFICO 1: Ingresos vs Salidas en el tiempo ───────────────────
+            st.divider()
+            st.markdown("##### Ingresos vs Salidas en el tiempo")
+
+            if not s_ing.empty or not s_sal.empty:
+                # Unir ambas series por período
+                df_evol = pd.merge(
+                    s_ing.rename(columns={"Cantidad": "Ingresos"}),
+                    s_sal.rename(columns={"Cantidad": "Salidas"}),
+                    on="Período", how="outer"
+                ).fillna(0).sort_values("Período")
+
+                fig1 = go.Figure()
+                fig1.add_trace(go.Bar(
+                    x=df_evol["Período"], y=df_evol["Ingresos"],
+                    name="📥 Ingresos", marker_color="#2ecc71"
+                ))
+                fig1.add_trace(go.Bar(
+                    x=df_evol["Período"], y=df_evol["Salidas"],
+                    name="📤 Salidas", marker_color="#e74c3c"
+                ))
+                fig1.update_layout(
+                    barmode="group",
+                    xaxis_title="Período",
+                    yaxis_title="Unidades",
+                    legend=dict(orientation="h", y=1.1),
+                    height=380,
+                    margin=dict(t=30, b=30),
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#ffffff"),
+                )
+                fig1.update_xaxes(showgrid=False)
+                fig1.update_yaxes(gridcolor="rgba(255,255,255,0.1)")
+                st.plotly_chart(fig1, use_container_width=True)
+            else:
+                st.info("Sin datos para este gráfico.")
+
+            # ── GRÁFICO 2: Top insumos más ingresados ─────────────────────────
+            st.divider()
+            with col_top:
+                top_n = st.slider("Top insumos a mostrar", 5, 20, 10, key="graf_top_n")
+
+            col_g2, col_g3 = st.columns(2)
+
+            with col_g2:
+                st.markdown("##### Top insumos más ingresados")
+                if not df_ing.empty and "Nombre del insumo" in df_ing.columns:
+                    top_ing = (
+                        df_ing.groupby("Nombre del insumo")["Cantidad"]
+                        .sum().nlargest(top_n).reset_index()
+                        .rename(columns={"Cantidad": "Total ingresado"})
+                    )
+                    top_ing["Nombre corto"] = top_ing["Nombre del insumo"].str[:25]
+                    fig2 = px.bar(
+                        top_ing, x="Total ingresado", y="Nombre corto",
+                        orientation="h", color="Total ingresado",
+                        color_continuous_scale="Greens",
+                        labels={"Total ingresado": "Unidades", "Nombre corto": ""},
+                    )
+                    fig2.update_layout(
+                        height=380, showlegend=False,
+                        coloraxis_showscale=False,
+                        margin=dict(t=10, b=10, l=10),
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ffffff"),
+                        yaxis=dict(autorange="reversed"),
+                    )
+                    fig2.update_xaxes(showgrid=False)
+                    fig2.update_yaxes(showgrid=False)
+                    st.plotly_chart(fig2, use_container_width=True)
+                else:
+                    st.info("Sin datos de ingresos.")
+
+            # ── GRÁFICO 3: Top insumos más despachados ────────────────────────
+            with col_g3:
+                st.markdown("##### Top insumos más despachados")
+                if not df_sal.empty and "Nombre del insumo" in df_sal.columns:
+                    top_sal = (
+                        df_sal.groupby("Nombre del insumo")["Cantidad"]
+                        .sum().nlargest(top_n).reset_index()
+                        .rename(columns={"Cantidad": "Total despachado"})
+                    )
+                    top_sal["Nombre corto"] = top_sal["Nombre del insumo"].str[:25]
+                    fig3 = px.bar(
+                        top_sal, x="Total despachado", y="Nombre corto",
+                        orientation="h", color="Total despachado",
+                        color_continuous_scale="Reds",
+                        labels={"Total despachado": "Unidades", "Nombre corto": ""},
+                    )
+                    fig3.update_layout(
+                        height=380, showlegend=False,
+                        coloraxis_showscale=False,
+                        margin=dict(t=10, b=10, l=10),
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ffffff"),
+                        yaxis=dict(autorange="reversed"),
+                    )
+                    fig3.update_xaxes(showgrid=False)
+                    fig3.update_yaxes(showgrid=False)
+                    st.plotly_chart(fig3, use_container_width=True)
+                else:
+                    st.info("Sin datos de salidas.")
+
+            # ── GRÁFICO 4: Distribución de salidas por sucursal ───────────────
+            st.divider()
+            st.markdown("##### Distribución de despachos por sucursal")
+            if not df_sal.empty and "Destino" in df_sal.columns:
+                dist_suc = (
+                    df_sal.groupby("Destino")["Cantidad"]
+                    .sum().reset_index()
+                    .rename(columns={"Cantidad": "Unidades despachadas"})
+                    .sort_values("Unidades despachadas", ascending=False)
+                )
+                col_pie, col_bar_suc = st.columns(2)
+                with col_pie:
+                    fig4 = px.pie(
+                        dist_suc, values="Unidades despachadas", names="Destino",
+                        hole=0.45,
+                        color_discrete_sequence=px.colors.qualitative.Set3,
+                    )
+                    fig4.update_layout(
+                        height=350,
+                        margin=dict(t=20, b=20),
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ffffff"),
+                        legend=dict(orientation="v"),
+                    )
+                    fig4.update_traces(textposition="inside", textinfo="percent+label")
+                    st.plotly_chart(fig4, use_container_width=True)
+                with col_bar_suc:
+                    fig5 = px.bar(
+                        dist_suc, x="Destino", y="Unidades despachadas",
+                        color="Unidades despachadas",
+                        color_continuous_scale="Blues",
+                        labels={"Unidades despachadas": "Unidades"},
+                    )
+                    fig5.update_layout(
+                        height=350, showlegend=False,
+                        coloraxis_showscale=False,
+                        margin=dict(t=10, b=10),
+                        plot_bgcolor="rgba(0,0,0,0)",
+                        paper_bgcolor="rgba(0,0,0,0)",
+                        font=dict(color="#ffffff"),
+                    )
+                    fig5.update_xaxes(showgrid=False)
+                    fig5.update_yaxes(gridcolor="rgba(255,255,255,0.1)")
+                    st.plotly_chart(fig5, use_container_width=True)
+            else:
+                st.info("Sin datos de salidas por sucursal.")
+
+
 # ══════════════════════════════════════════════
 # TAB 4 — CARGA INICIAL
 # ══════════════════════════════════════════════
@@ -1172,12 +1413,13 @@ with tab_alertas:
 # ══════════════════════════════════════════════
 with tab_reportes:
     st.subheader("Reportes de stock")
-    r1, r2, r3, r4, r5 = st.tabs([
+    r1, r2, r3, r4, r5, r6 = st.tabs([
         "Stock por lote",
         "Stock por sucursal",
         "Sin lote",
         "📥 Historial de ingresos",
         "📤 Historial de salidas",
+        "📈 Gráficos",
     ])
 
     with r1:
